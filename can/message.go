@@ -36,9 +36,11 @@ type Message struct {
 
 // NewMessage creates a new CAN message
 func NewMessage(id uint32, data []byte) *Message {
+	length := uint8(len(data))
 	msg := &Message{
 		ID:     id,
-		Length: uint8(len(data)),
+		Length: length,
+		DLC:    canfdLenToDLC(length),
 	}
 
 	if len(data) > 64 {
@@ -134,7 +136,8 @@ func (m *Message) Marshal(frame *[CANFD_MTU]byte) error {
 	// Bytes 8-71: Data (up to 64 bytes)
 
 	binary.LittleEndian.PutUint32(frame[0:4], m.ID)
-	frame[4] = m.DLC
+	// SocketCAN CAN-FD uses actual payload length (0..64), not DLC
+	frame[4] = m.Length
 	frame[5] = m.Flags
 	// Bytes 6-7 are reserved and already zeroed
 
@@ -202,9 +205,10 @@ func (m *Message) Unmarshal(frame []byte) error {
 
 	// Parse CAN-FD frame structure
 	m.ID = binary.LittleEndian.Uint32(frame[0:4])
-	dlc := frame[4] // Data Length Code
-	m.DLC = dlc
-	m.Length = dlcToCanfdLen(dlc)
+	// SocketCAN CAN-FD: byte 4 is actual length (0..64), not DLC
+	length := frame[4]
+	m.Length = length
+	m.DLC = canfdLenToDLC(length)
 	m.Flags = frame[5]
 	// Bytes 6-7 are reserved
 

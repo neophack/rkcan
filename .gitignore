@@ -1,2 +1,5 @@
 UdpCanFdReceiver/build
 rkcan-linux-arm32
+
+# Accidental generated files
+UDP

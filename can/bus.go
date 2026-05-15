@@ -109,6 +109,13 @@ func NewBus(ifaceName string) (bus *Bus, err error) {
 		return
 	}
 
+	// Increase socket receive buffer to prevent kernel-level frame loss
+	// under high bus load. Default (~208KB) is too small for burst traffic.
+	rcvBufSize := 4 * 1024 * 1024 // 4 MB
+	if err = syscall.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, rcvBufSize); err != nil {
+		log.Printf("Warning: failed to set CAN socket SO_RCVBUF to %d: %v", rcvBufSize, err)
+	}
+
 	// Bind socket to actual interface
 	err = unix.Bind(fd, &unix.SockaddrCAN{Ifindex: iface.Index})
 	if err != nil {
@@ -125,7 +132,7 @@ func NewBus(ifaceName string) (bus *Bus, err error) {
 		sendQueue:       make(chan *Message, 10000),
 		stopSend:        make(chan interface{}),
 		running:         true,
-		recvQueue:       make(chan *Message, 100000),
+		recvQueue:       make(chan *Message, 200000),
 		ctx:             ctx,
 		cancel:          cancel,
 		minSendInterval: 500 * time.Microsecond, // Minimum 500µs between sends
@@ -142,11 +149,13 @@ func NewBus(ifaceName string) (bus *Bus, err error) {
 func (b *Bus) Shutdown() {
 	b.cancel()
 	b.running = false
-	close(b.recvQueue)
-	close(b.stopSend)
 	if b.file != nil {
+		// Shut down the socket first to unblock any pending Read/Write
+		unix.Shutdown(b.fd, unix.SHUT_RDWR)
 		b.file.Close()
 	}
+	// Close recvQueue so consumers can exit cleanly
+	close(b.recvQueue)
 }
 
 // ResetFilters resets CAN filters to allow all messages

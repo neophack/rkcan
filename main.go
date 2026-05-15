@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -7,6 +9,7 @@ import (
 	"hash/crc32"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -16,13 +19,18 @@ import (
 	"time"
 
 	"github.com/penghongxia/rkcan/can"
+	"github.com/penghongxia/rkcan/filemanager"
+	"github.com/penghongxia/rkcan/serial"
+	"github.com/penghongxia/rkcan/system"
+	"github.com/penghongxia/rkcan/web"
+	"github.com/penghongxia/rkcan/wifi"
 )
 
 const (
-	udpPacketMaxSize   = 1400 // avoid IP fragmentation
-	payloadHeaderSize  = 30   // fixed header before CAN data
-	flushInterval      = 500 * time.Microsecond
-	statsInterval      = 5 * time.Second
+	udpPacketMaxSize  = 1400
+	payloadHeaderSize = 30
+	flushInterval     = 500 * time.Microsecond
+	statsInterval     = 5 * time.Second
 )
 
 var (
@@ -30,16 +38,13 @@ var (
 	can0Iface  = flag.String("can0", "can0", "First CAN interface")
 	can1Iface  = flag.String("can1", "can1", "Second CAN interface")
 	noSend     = flag.Bool("nosend", true, "Disable built-in demo CAN sender")
+	webPort    = flag.Int("port", 80, "Web dashboard HTTP port")
+	fileRoot   = flag.String("fileroot", "/userdata", "File manager root directory")
 )
 
-// global sequence number, monotonically increasing across both channels
 var globalSeq uint32
-
-// program start time for mcuRelUs
 var startTime = time.Now()
 
-// canFrameInfo holds the necessary fields for UDP serialization without
-// referencing the underlying *can.Message after Send() returns.
 type canFrameInfo struct {
 	seq     uint32
 	channel uint8
@@ -50,13 +55,8 @@ type canFrameInfo struct {
 	ts      time.Time
 }
 
-// udpBatchSender aggregates multiple CAN frames into UDP packets and flushes
-// periodically to keep latency low.  All methods are goroutine-safe.
-//
-// Note: 64-bit atomic fields MUST be placed at the top of the struct to
-// guarantee alignment on 32-bit architectures (e.g. ARM32).
+// Note: 64-bit atomic fields MUST be placed at the top for 32-bit ARM alignment.
 type udpBatchSender struct {
-	// 64-bit fields used with sync/atomic — keep first!
 	sentFrames  uint64
 	sentPkts    uint64
 	writeErrs   uint64
@@ -80,7 +80,6 @@ func newUDPSender(addr string) (*udpBatchSender, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 8 MB send buffer to absorb transient network back-pressure
 	if err := conn.SetWriteBuffer(8 * 1024 * 1024); err != nil {
 		log.Printf("Warning: failed to set UDP write buffer: %v", err)
 	}
@@ -92,7 +91,6 @@ func (s *udpBatchSender) Close() error {
 	return s.conn.Close()
 }
 
-// Flush sends the current packet immediately.  Safe to call from any goroutine.
 func (s *udpBatchSender) Flush() {
 	s.mu.Lock()
 	s.flushLocked()
@@ -113,68 +111,53 @@ func (s *udpBatchSender) flushLocked() {
 	s.frames = 0
 }
 
-// Send serializes a CAN frame into the current UDP packet and flushes
-// automatically when the packet is full.
 func (s *udpBatchSender) Send(f *canFrameInfo) {
 	payloadLen := uint16(payloadHeaderSize + f.dataLen)
-	frameTotal := 2 + 2 + int(payloadLen) + 4 // sync + len + payload + crc
+	frameTotal := 2 + 2 + int(payloadLen) + 4
 
 	s.mu.Lock()
 
-	// If the current packet cannot hold this frame, flush first.
 	if s.frames > 0 && s.pos+frameTotal > udpPacketMaxSize {
 		s.flushLocked()
 	}
 
-	// Sync word
 	s.buf[s.pos] = 0xAA
 	s.buf[s.pos+1] = 0x55
 	s.pos += 2
 
-	// Payload length (little-endian)
 	s.buf[s.pos] = byte(payloadLen)
 	s.buf[s.pos+1] = byte(payloadLen >> 8)
 	s.pos += 2
 
-	// --- Payload ---
 	payloadStart := s.pos
 
-	// 0-3: sequence number
 	binary.LittleEndian.PutUint32(s.buf[s.pos:s.pos+4], f.seq)
 	s.pos += 4
 
-	// 4: channel
 	s.buf[s.pos] = f.channel
 	s.pos++
 
 	utcUs := uint64(f.ts.UnixMicro())
 	mcuRelUs := uint32(time.Since(startTime).Microseconds())
 
-	// 5-12: utcUs
 	binary.LittleEndian.PutUint64(s.buf[s.pos:s.pos+8], utcUs)
 	s.pos += 8
 
-	// 13-16: mcuRelUs
 	binary.LittleEndian.PutUint32(s.buf[s.pos:s.pos+4], mcuRelUs)
 	s.pos += 4
 
-	// 17-24: qnxUtcUs (same as utcUs for Linux hosts)
 	binary.LittleEndian.PutUint64(s.buf[s.pos:s.pos+8], utcUs)
 	s.pos += 8
 
-	// 25-28: CAN ID (big-endian, matching SocketCAN bit layout)
 	binary.BigEndian.PutUint32(s.buf[s.pos:s.pos+4], f.canID)
 	s.pos += 4
 
-	// 29: DLC
 	s.buf[s.pos] = f.dlc
 	s.pos++
 
-	// 30+: data bytes
 	copy(s.buf[s.pos:s.pos+f.dataLen], f.data[:f.dataLen])
 	s.pos += f.dataLen
 
-	// CRC32 over payload (little-endian)
 	crc := crc32.ChecksumIEEE(s.buf[payloadStart:s.pos])
 	s.buf[s.pos] = byte(crc)
 	s.buf[s.pos+1] = byte(crc >> 8)
@@ -185,8 +168,6 @@ func (s *udpBatchSender) Send(f *canFrameInfo) {
 	s.frames++
 	atomic.AddUint64(&s.sentFrames, 1)
 
-	// If we have reached a reasonable frame count, flush immediately to
-	// bound latency for bursty traffic.
 	if s.pos >= udpPacketMaxSize-100 {
 		s.flushLocked()
 	}
@@ -194,23 +175,33 @@ func (s *udpBatchSender) Send(f *canFrameInfo) {
 	s.mu.Unlock()
 }
 
-// runReceiver opens a CAN interface and forwards every received frame to
-// the UDP sender.  It never drops frames: the bus recvQueue blocks instead.
 func runReceiver(ctx context.Context, iface string, channel uint8, sender *udpBatchSender) {
+	for {
+		err := runReceiverOnce(ctx, iface, channel, sender)
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("CAN receiver %s crashed: %v — restarting in 1s", iface, err)
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func runReceiverOnce(ctx context.Context, iface string, channel uint8, sender *udpBatchSender) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("PANIC recovered in receiver %s: %v", iface, r)
+			err = nil
 		}
 	}()
 
 	bus, err := can.NewBus(iface)
 	if err != nil {
-		log.Fatalf("FATAL: failed to open %s: %v", iface, err)
+		return err
 	}
 	defer bus.Shutdown()
 
-	if err := bus.ResetFilters(); err != nil {
-		log.Printf("Warning: failed to reset filters on %s: %v", iface, err)
+	if resetErr := bus.ResetFilters(); resetErr != nil {
+		log.Printf("Warning: failed to reset filters on %s: %v", iface, resetErr)
 	}
 
 	log.Printf("CAN receiver started: %s (channel %d)", iface, channel)
@@ -218,10 +209,10 @@ func runReceiver(ctx context.Context, iface string, channel uint8, sender *udpBa
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case msg, ok := <-bus.RecvQueue():
 			if !ok {
-				return
+				return nil
 			}
 
 			var info canFrameInfo
@@ -248,8 +239,6 @@ func runReceiver(ctx context.Context, iface string, channel uint8, sender *udpBa
 	}
 }
 
-// periodicFlusher ensures the UDP packet is sent at least every flushInterval,
-// bounding end-to-end latency even during low-rate periods.
 func periodicFlusher(ctx context.Context, sender *udpBatchSender) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -270,7 +259,6 @@ func periodicFlusher(ctx context.Context, sender *udpBatchSender) {
 	}
 }
 
-// statsReporter prints throughput and health metrics every few seconds.
 func statsReporter(ctx context.Context, sender *udpBatchSender) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -307,8 +295,6 @@ func statsReporter(ctx context.Context, sender *udpBatchSender) {
 	}
 }
 
-// canSender is the original demo sender, disabled by default so it does not
-// interfere with real CAN traffic on a live bus.
 func canSender(ctx context.Context, bus *can.Bus) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -329,7 +315,7 @@ func canSender(ctx context.Context, bus *can.Bus) {
 			return
 		case <-ticker.C:
 			msg := can.NewMessage(0x123, []byte{0x01, 0x02, counter, 0x04})
-			_ = bus.Send(msg) // ignore errors in demo sender
+			_ = bus.Send(msg)
 			counter++
 		}
 	}
@@ -338,14 +324,14 @@ func canSender(ctx context.Context, bus *can.Bus) {
 func main() {
 	flag.Parse()
 
-	// Use all available CPU cores; Go 1.20+ defaults to this, but be explicit.
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	log.Printf("========================================")
 	log.Printf(" RKCAN - Dual CAN-FD to UDP Bridge")
-	log.Printf(" Target: %s", *targetAddr)
-	log.Printf(" CAN0  : %s", *can0Iface)
-	log.Printf(" CAN1  : %s", *can1Iface)
+	log.Printf(" Target : %s", *targetAddr)
+	log.Printf(" CAN0   : %s", *can0Iface)
+	log.Printf(" CAN1   : %s", *can1Iface)
+	log.Printf(" Web    : http://0.0.0.0:%d", *webPort)
 	log.Printf("========================================")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -357,27 +343,66 @@ func main() {
 	}
 	defer sender.Close()
 
-	// Start helper goroutines.
+	// System monitoring
+	sysCollector := system.NewCollector()
+	go sysCollector.Start(ctx)
+
+	// WiFi manager
+	wifiMgr := wifi.NewManager()
+
+	// Serial reader
+	serialReader := serial.NewReader()
+
+	// File manager
+	fileMgr := filemanager.NewManager(*fileRoot)
+
+	// CAN stats provider for web dashboard
+	canStats := &web.CANStatsProvider{
+		RecvFrames0: &sender.recvFrames0,
+		RecvFrames1: &sender.recvFrames1,
+		SentFrames:  &sender.sentFrames,
+		SentPkts:    &sender.sentPkts,
+		WriteErrs:   &sender.writeErrs,
+	}
+
+	// Web server
+	webServer := web.NewServer(web.ServerConfig{
+		Port:         *webPort,
+		SysCollector: sysCollector,
+		CANStats:     canStats,
+		WifiMgr:      wifiMgr,
+		SerialReader: serialReader,
+		FileMgr:      fileMgr,
+		CANIfaces:    []string{*can0Iface, *can1Iface},
+	})
+
+	go func() {
+		if err := webServer.Start(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Web server error: %v", err)
+		}
+	}()
+
+	// Start CAN infrastructure
 	go periodicFlusher(ctx, sender)
 	go statsReporter(ctx, sender)
 
 	var wg sync.WaitGroup
 
-	// CAN0 receiver
+	// CAN0 receiver with auto-restart
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		runReceiver(ctx, *can0Iface, 0, sender)
 	}()
 
-	// CAN1 receiver
+	// CAN1 receiver with auto-restart
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		runReceiver(ctx, *can1Iface, 1, sender)
 	}()
 
-	// Optional demo sender on can0 (disabled by default on a live bus).
+	// Optional demo sender
 	if !*noSend {
 		bus, err := can.NewBus(*can0Iface)
 		if err != nil {
@@ -392,17 +417,27 @@ func main() {
 		}
 	}
 
-	// Wait for shutdown signal.
+	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	sig := <-sigCh
 	log.Printf("Received signal %v, initiating graceful shutdown...", sig)
 	cancel()
+
+	// Close UDP sender first to unblock any pending WriteToUDP in CAN receivers
+	sender.Close()
+
+	// Shutdown web server with timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	webServer.Shutdown(shutdownCtx)
+
+	// Close serial reader
+	serialReader.Close()
+
 	wg.Wait()
 
-	// Final flush to ensure no frames are left in the buffer.
-	sender.Flush()
 	log.Printf("Shutdown complete. Total frames forwarded: %d",
 		atomic.LoadUint64(&sender.sentFrames))
 }
