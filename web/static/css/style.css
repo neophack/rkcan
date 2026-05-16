@@ -980,6 +980,97 @@ select {
     padding: 8px 0;
 }
 
+/* Chrony */
+.chrony-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg-input);
+    color: var(--text-muted);
+}
+.chrony-status-badge.ok { background: var(--green-bg); color: var(--green); }
+.chrony-status-badge.warn { background: var(--yellow-bg); color: var(--yellow); }
+.chrony-status-badge.error { background: var(--red-bg); color: var(--red); }
+
+.chrony-overview-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+}
+.chrony-overview-item {
+    background: rgba(15,23,42,0.4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.chrony-overview-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+.chrony-overview-value {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+}
+
+.chrony-source-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 600;
+}
+.chrony-source-status .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+}
+.chrony-source-status.selected { color: var(--green); }
+.chrony-source-status.selected .dot { background: var(--green); }
+.chrony-source-status.backup { color: var(--blue); }
+.chrony-source-status.backup .dot { background: var(--blue); }
+.chrony-source-status.unreachable { color: var(--red); }
+.chrony-source-status.unreachable .dot { background: var(--red); }
+
+.chrony-config-display {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--teal);
+    background: rgba(15,23,42,0.5);
+    padding: 10px;
+    border-radius: var(--radius-sm);
+    overflow-x: auto;
+    white-space: pre;
+    max-height: 400px;
+    overflow-y: auto;
+    line-height: 1.5;
+    margin: 0;
+}
+.chrony-config-editor {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    width: 100%;
+    min-height: 300px;
+    resize: vertical;
+    outline: none;
+    line-height: 1.5;
+}
+.chrony-config-editor:focus { border-color: var(--blue); }
+
 /* Responsive */
 @media (max-width: 768px) {
     .content { padding: 10px; }
@@ -993,6 +1084,8 @@ select {
     .wifi-layout { grid-template-columns: 1fr; }
     .wifi-status-grid { grid-template-columns: 1fr 1fr; }
     .can-details-grid { grid-template-columns: 1fr; }
+    .chrony-grid { grid-template-columns: 1fr; }
+    .chrony-overview-grid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 768px) {
     .content { padding: 10px; }

@@ -41,6 +41,12 @@
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
       </svg>
     </div>
+    <div class="sidebar-icon" data-tab="chrony" data-tooltip="Chrony">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <polyline points="12 6 12 12 16 14"/>
+      </svg>
+    </div>
     <div class="sidebar-icon" data-tab="dmesg" data-tooltip="Dmesg">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
@@ -540,6 +546,102 @@
         </div>
       </div>
 
+      <!-- ==================== Chrony Tab ==================== -->
+      <div id="tab-chrony" class="tab-panel">
+        <!-- Tracking Overview -->
+        <div class="card">
+          <div class="card-header">
+            NTP 同步状态
+            <div class="card-header-actions">
+              <span class="chrony-status-badge" id="chrony-leap-badge">--</span>
+              <button class="btn btn-sm btn-primary" id="chrony-refresh-btn">Refresh</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="chrony-overview-grid" id="chrony-overview">
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">Reference ID</span>
+                <span class="chrony-overview-value" id="chrony-ref-id">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">Stratum</span>
+                <span class="chrony-overview-value" id="chrony-stratum">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">System Time</span>
+                <span class="chrony-overview-value" id="chrony-system-time">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">Last Offset</span>
+                <span class="chrony-overview-value" id="chrony-last-offset">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">RMS Offset</span>
+                <span class="chrony-overview-value" id="chrony-rms-offset">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">Residual Freq</span>
+                <span class="chrony-overview-value" id="chrony-residual-freq">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">Update Interval</span>
+                <span class="chrony-overview-value" id="chrony-update-interval">--</span>
+              </div>
+              <div class="chrony-overview-item">
+                <span class="chrony-overview-label">Root Delay</span>
+                <span class="chrony-overview-value" id="chrony-root-delay">--</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sources -->
+        <div class="card">
+          <div class="card-header">NTP 服务器源</div>
+          <div class="card-body card-body-table">
+            <table class="data-table">
+              <thead>
+                <tr><th>状态</th><th>服务器</th><th>层级</th><th>轮询</th><th>可达</th><th>上次通信</th><th>偏差</th></tr>
+              </thead>
+              <tbody id="chrony-sources-tbody">
+                <tr><td colspan="7" style="color:var(--text-muted)">Click Refresh to load...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Source Stats -->
+        <div class="card">
+          <div class="card-header">源统计</div>
+          <div class="card-body card-body-table">
+            <table class="data-table">
+              <thead>
+                <tr><th>服务器</th><th>NP</th><th>NR</th><th>Span</th><th>Frequency</th><th>Freq Skew</th><th>Offset</th><th>Std Dev</th></tr>
+              </thead>
+              <tbody id="chrony-sourcestats-tbody">
+                <tr><td colspan="8" style="color:var(--text-muted)">Click Refresh to load...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Config -->
+        <div class="card">
+          <div class="card-header">
+            /etc/chrony.conf
+            <div class="card-header-actions">
+              <button class="btn btn-sm btn-primary" id="chrony-config-edit-btn">Edit</button>
+              <button class="btn btn-sm btn-primary" id="chrony-config-save-btn" hidden>Save</button>
+              <button class="btn btn-sm" id="chrony-config-cancel-btn" hidden>Cancel</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <pre class="chrony-config-display" id="chrony-config-pre">Click Refresh to load...</pre>
+            <textarea class="chrony-config-editor" id="chrony-config-textarea" hidden></textarea>
+          </div>
+        </div>
+      </div>
+
       <!-- ==================== Dmesg Tab ==================== -->
       <div id="tab-dmesg" class="tab-panel">
         <div class="card card-grow">
@@ -603,6 +705,7 @@
 <script src="js/wifi.js"></script>
 <script src="js/serial.js"></script>
 <script src="js/files.js"></script>
+<script src="js/chrony.js"></script>
 <script src="js/dmesg.js"></script>
 </body>
 </html>

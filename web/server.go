@@ -10,8 +10,10 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -185,6 +187,10 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/serial/close", s.handleSerialClose)
 	mux.HandleFunc("/api/serial/logs", s.handleSerialLogs)
 	mux.HandleFunc("/api/serial/sse", s.handleSerialSSE)
+
+	// Chrony APIs
+	mux.HandleFunc("/api/chrony", s.handleChrony)
+	mux.HandleFunc("/api/chrony/config", s.handleChronyConfig)
 
 	// File APIs
 	mux.HandleFunc("/api/files/list", s.handleFileList)
@@ -710,4 +716,251 @@ func (s *Server) handleFileRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+type ChronyTracking struct {
+	ReferenceID    string `json:"referenceID"`
+	Stratum        int    `json:"stratum"`
+	RefTime        string `json:"refTime"`
+	SystemTime     string `json:"systemTime"`
+	LastOffset     string `json:"lastOffset"`
+	RMSOffset      string `json:"rmsOffset"`
+	Frequency      string `json:"frequency"`
+	ResidualFreq   string `json:"residualFreq"`
+	Skew           string `json:"skew"`
+	RootDelay      string `json:"rootDelay"`
+	RootDispersion string `json:"rootDispersion"`
+	UpdateInterval string `json:"updateInterval"`
+	LeapStatus     string `json:"leapStatus"`
+}
+
+type ChronySource struct {
+	State    string `json:"state"`
+	Name     string `json:"name"`
+	Stratum  int    `json:"stratum"`
+	Poll     int    `json:"poll"`
+	Reach    int    `json:"reach"`
+	LastRx   int    `json:"lastRx"`
+	Offset   string `json:"offset"`
+	Selected bool   `json:"selected"`
+}
+
+type ChronySourceStat struct {
+	Name       string `json:"name"`
+	NP         int    `json:"np"`
+	NR         int    `json:"nr"`
+	Span       string `json:"span"`
+	Frequency  string `json:"frequency"`
+	FreqSkew   string `json:"freqSkew"`
+	Offset     string `json:"offset"`
+	StdDev     string `json:"stdDev"`
+}
+
+type ChronyResult struct {
+	Tracking    *ChronyTracking    `json:"tracking"`
+	Sources     []ChronySource     `json:"sources"`
+	SourceStats []ChronySourceStat `json:"sourceStats"`
+	Config      string             `json:"config"`
+	Error       string             `json:"error,omitempty"`
+}
+
+func parseChronyTracking(out string) *ChronyTracking {
+	t := &ChronyTracking{}
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, ":"); idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			val := strings.TrimSpace(line[idx+1:])
+			switch key {
+			case "Reference ID":
+				t.ReferenceID = val
+			case "Stratum":
+				fmt.Sscanf(val, "%d", &t.Stratum)
+			case "Ref time (UTC)":
+				t.RefTime = val
+			case "System time":
+				t.SystemTime = val
+			case "Last offset":
+				t.LastOffset = val
+			case "RMS offset":
+				t.RMSOffset = val
+			case "Frequency":
+				t.Frequency = val
+			case "Residual freq":
+				t.ResidualFreq = val
+			case "Skew":
+				t.Skew = val
+			case "Root delay":
+				t.RootDelay = val
+			case "Root dispersion":
+				t.RootDispersion = val
+			case "Update interval":
+				t.UpdateInterval = val
+			case "Leap status":
+				t.LeapStatus = val
+			}
+		}
+	}
+	return t
+}
+
+func parseChronySources(out string) []ChronySource {
+	var sources []ChronySource
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if len(line) == 0 || strings.HasPrefix(line, "MS") || strings.HasPrefix(line, "==") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		state := parts[0]
+		name := parts[1]
+		s := ChronySource{State: state, Name: name}
+		if len(state) >= 2 && state[len(state)-1] == '*' {
+			s.Selected = true
+		}
+		if len(parts) > 2 {
+			fmt.Sscanf(parts[2], "%d", &s.Stratum)
+		}
+		if len(parts) > 3 {
+			fmt.Sscanf(parts[3], "%d", &s.Poll)
+		}
+		if len(parts) > 4 {
+			fmt.Sscanf(parts[4], "%d", &s.Reach)
+		}
+		if len(parts) > 5 {
+			fmt.Sscanf(parts[5], "%d", &s.LastRx)
+		}
+		if len(parts) > 6 {
+			// offset field may contain multiple tokens before +/-
+			offsetParts := []string{}
+			for i := 6; i < len(parts); i++ {
+				if parts[i] == "+/-" {
+					break
+				}
+				offsetParts = append(offsetParts, parts[i])
+			}
+			s.Offset = strings.Join(offsetParts, " ")
+		}
+		sources = append(sources, s)
+	}
+	return sources
+}
+
+func parseChronySourceStats(out string) []ChronySourceStat {
+	var stats []ChronySourceStat
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if len(line) == 0 || strings.HasPrefix(line, "Name/IP") || strings.HasPrefix(line, "==") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 8 {
+			continue
+		}
+		s := ChronySourceStat{Name: parts[0]}
+		fmt.Sscanf(parts[1], "%d", &s.NP)
+		fmt.Sscanf(parts[2], "%d", &s.NR)
+		s.Span = parts[3]
+		s.Frequency = parts[4]
+		s.FreqSkew = parts[5]
+		s.Offset = parts[6]
+		s.StdDev = parts[7]
+		stats = append(stats, s)
+	}
+	return stats
+}
+
+// Chrony API handler
+func (s *Server) handleChrony(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeError(w, 405, "Method not allowed")
+		return
+	}
+
+	var res ChronyResult
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	runCmd := func(args ...string) string {
+		out, err := exec.Command("/userdata/chronyc", args...).CombinedOutput()
+		if err != nil {
+			return fmt.Sprintf("Error: %v\n%s", err, string(out))
+		}
+		return string(out)
+	}
+
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		out := runCmd("tracking")
+		mu.Lock()
+		res.Tracking = parseChronyTracking(out)
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		out := runCmd("sources")
+		mu.Lock()
+		res.Sources = parseChronySources(out)
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		out := runCmd("sourcestats")
+		mu.Lock()
+		res.SourceStats = parseChronySourceStats(out)
+		mu.Unlock()
+	}()
+	go func() {
+		defer wg.Done()
+		out, err := os.ReadFile("/etc/chrony.conf")
+		if err != nil {
+			mu.Lock()
+			res.Config = fmt.Sprintf("Error reading /etc/chrony.conf: %v", err)
+			mu.Unlock()
+			return
+		}
+		mu.Lock()
+		res.Config = string(out)
+		mu.Unlock()
+	}()
+
+	wg.Wait()
+	writeJSON(w, res)
+}
+
+func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		out, err := os.ReadFile("/etc/chrony.conf")
+		if err != nil {
+			writeError(w, 500, fmt.Sprintf("Failed to read config: %v", err))
+			return
+		}
+		writeJSON(w, map[string]string{"config": string(out)})
+		return
+	}
+
+	if r.Method == "POST" {
+		var req struct {
+			Config string `json:"config"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, 400, "Invalid request")
+			return
+		}
+		if err := os.WriteFile("/etc/chrony.conf", []byte(req.Config), 0644); err != nil {
+			writeError(w, 500, fmt.Sprintf("Failed to write config: %v", err))
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	writeError(w, 405, "Method not allowed")
 }
