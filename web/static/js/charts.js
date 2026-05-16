@@ -14,6 +14,13 @@ var ChartColors = Object.freeze({
     TextDim:     '#94a3b8',
 });
 
+function niceMax(max) {
+    if (max <= 0) return 1;
+    if (max < 1) return 1;
+    var d = Math.pow(10, Math.floor(Math.log10(max)));
+    return Math.ceil(max / d) * d;
+}
+
 function LineChart(canvas, opts) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
@@ -120,8 +127,9 @@ LineChart.prototype.render = function () {
             }
         }
         if (allMin !== Infinity) {
-            yMin = Math.floor(allMin * 0.9);
-            yMax = Math.ceil(allMax * 1.1) || 1;
+            yMin = o.yMin;
+            if (allMin < yMin) yMin = Math.floor(allMin);
+            yMax = niceMax(allMax);
         }
     }
     var yRange = yMax - yMin || 1;
@@ -147,8 +155,9 @@ LineChart.prototype.render = function () {
             ctx.lineTo(pad.left + plotW, y);
             ctx.stroke();
 
+            var decimals = (val < 1 && val > 0) ? 1 : 0;
             ctx.fillText(
-                val.toFixed(val === Math.floor(val) ? 0 : 1) + o.yLabel,
+                val.toFixed(decimals) + o.yLabel,
                 pad.left - 4, y
             );
         }

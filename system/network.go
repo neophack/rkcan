@@ -12,6 +12,10 @@ import (
 
 type NetworkStats struct {
 	Interfaces map[string]*NetIfaceStats `json:"interfaces"`
+	TotalRx    uint64                    `json:"totalRx"`
+	TotalTx    uint64                    `json:"totalTx"`
+	RxHistory  []uint64                  `json:"rxHistory"`
+	TxHistory  []uint64                  `json:"txHistory"`
 }
 
 type NetIfaceStats struct {
@@ -55,6 +59,9 @@ func (c *NetCollector) Collect() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	var totalRx uint64
+	var totalTx uint64
+
 	for name, vals := range ifaces {
 		prev, ok := c.prev[name]
 		st, exists := c.stat.Interfaces[name]
@@ -84,7 +91,24 @@ func (c *NetCollector) Collect() {
 			st.TxHistory = st.TxHistory[len(st.TxHistory)-historySize:]
 		}
 
+		if ok {
+			totalRx += st.RxBytesPerSec
+			totalTx += st.TxBytesPerSec
+		}
+
 		c.prev[name] = vals
+	}
+
+	c.stat.TotalRx = totalRx
+	c.stat.TotalTx = totalTx
+
+	c.stat.RxHistory = append(c.stat.RxHistory, totalRx)
+	c.stat.TxHistory = append(c.stat.TxHistory, totalTx)
+	if len(c.stat.RxHistory) > historySize {
+		c.stat.RxHistory = c.stat.RxHistory[len(c.stat.RxHistory)-historySize:]
+	}
+	if len(c.stat.TxHistory) > historySize {
+		c.stat.TxHistory = c.stat.TxHistory[len(c.stat.TxHistory)-historySize:]
 	}
 }
 
@@ -92,7 +116,15 @@ func (c *NetCollector) Stats() NetworkStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	s := NetworkStats{Interfaces: make(map[string]*NetIfaceStats)}
+	s := NetworkStats{
+		Interfaces: make(map[string]*NetIfaceStats),
+		TotalRx:    c.stat.TotalRx,
+		TotalTx:    c.stat.TotalTx,
+		RxHistory:  make([]uint64, len(c.stat.RxHistory)),
+		TxHistory:  make([]uint64, len(c.stat.TxHistory)),
+	}
+	copy(s.RxHistory, c.stat.RxHistory)
+	copy(s.TxHistory, c.stat.TxHistory)
 	for k, v := range c.stat.Interfaces {
 		cp := *v
 		cp.RxHistory = make([]uint64, len(v.RxHistory))

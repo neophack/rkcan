@@ -77,6 +77,7 @@
                 showValue: false,
                 background: '#1e293b',
                 gridColor: '#334155',
+                padding: { top: 8, right: 8, bottom: 20, left: 60 },
             });
             netTxIndex = netChart.addSeries({
                 color: '#f97316',
@@ -173,21 +174,17 @@
             }
         }
 
-        if (netChart && data.network && data.network.interfaces) {
-            var ifaces = data.network.interfaces;
-            var ifaceNames = Object.keys(ifaces);
-            if (ifaceNames.length > 0) {
-                var primary = ifaces[ifaceNames[0]];
-                if (firstData && primary.rxHistory && primary.rxHistory.length > 0) {
-                    var rxHist = primary.rxHistory.map(function (v) { return v / 1024; });
-                    var txHist = (primary.txHistory || []).map(function (v) { return v / 1024; });
-                    netChart.setData(rxHist, 0);
-                    if (netTxIndex >= 0) netChart.setData(txHist, netTxIndex);
-                } else {
-                    netChart.addPoint((primary.rxBytesPerSec || 0) / 1024, 0);
-                    if (netTxIndex >= 0) {
-                        netChart.addPoint((primary.txBytesPerSec || 0) / 1024, netTxIndex);
-                    }
+        if (netChart && data.network) {
+            var net = data.network;
+            if (firstData && net.rxHistory && net.rxHistory.length > 0) {
+                var rxHist = net.rxHistory.map(function (v) { return v / 1024; });
+                var txHist = (net.txHistory || []).map(function (v) { return v / 1024; });
+                netChart.setData(rxHist, 0);
+                if (netTxIndex >= 0) netChart.setData(txHist, netTxIndex);
+            } else {
+                netChart.addPoint((net.totalRx || 0) / 1024, 0);
+                if (netTxIndex >= 0) {
+                    netChart.addPoint((net.totalTx || 0) / 1024, netTxIndex);
                 }
             }
         }
