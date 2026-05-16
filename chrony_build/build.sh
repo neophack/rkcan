@@ -5,7 +5,10 @@ apt-get install -y gcc-arm-linux-gnueabihf build-essential wget
 wget https://chrony-project.org/releases/chrony-4.5.tar.gz
 tar xf chrony-4.5.tar.gz
 cd chrony-4.5
-./configure --host=arm-linux-gnueabihf --prefix=/out \
+CC=arm-linux-gnueabihf-gcc \
+./configure --prefix=/out \
+    --host-machine=arm \
+    --host-system=Linux \
     LDFLAGS="-static" \
     --without-nss \
     --without-editline \
