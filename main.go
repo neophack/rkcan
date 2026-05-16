@@ -363,7 +363,9 @@ func main() {
 		SentFrames:  &sender.sentFrames,
 		SentPkts:    &sender.sentPkts,
 		WriteErrs:   &sender.writeErrs,
+		Ifaces:      []string{*can0Iface, *can1Iface},
 	}
+	go canStats.Start(ctx)
 
 	// Web server
 	webServer := web.NewServer(web.ServerConfig{

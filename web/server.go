@@ -11,6 +11,8 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,13 +27,25 @@ import (
 var staticFiles embed.FS
 
 type CANStats struct {
-	Can0FPS     uint64 `json:"can0Fps"`
-	Can0Total   uint64 `json:"can0Total"`
-	Can1FPS     uint64 `json:"can1Fps"`
-	Can1Total   uint64 `json:"can1Total"`
-	UDPSentPkts uint64 `json:"udpSentPkts"`
-	UDPErrors   uint64 `json:"udpErrors"`
-	SentFrames  uint64 `json:"sentFrames"`
+	Can0FPS        uint64  `json:"can0Fps"`
+	Can0Total      uint64  `json:"can0Total"`
+	Can0Bitrate    uint32  `json:"can0Bitrate"`
+	Can0State      string  `json:"can0State"`
+	Can0SamplePt   float64 `json:"can0SamplePt"`
+	Can0DBitrate   uint32  `json:"can0DBitrate"`
+	Can0DSamplePt  float64 `json:"can0DSamplePt"`
+	Can0BusState   string  `json:"can0BusState"`
+	Can1FPS        uint64  `json:"can1Fps"`
+	Can1Total      uint64  `json:"can1Total"`
+	Can1Bitrate    uint32  `json:"can1Bitrate"`
+	Can1State      string  `json:"can1State"`
+	Can1SamplePt   float64 `json:"can1SamplePt"`
+	Can1DBitrate   uint32  `json:"can1DBitrate"`
+	Can1DSamplePt  float64 `json:"can1DSamplePt"`
+	Can1BusState   string  `json:"can1BusState"`
+	UDPSentPkts    uint64  `json:"udpSentPkts"`
+	UDPErrors      uint64  `json:"udpErrors"`
+	SentFrames     uint64  `json:"sentFrames"`
 }
 
 type CANStatsProvider struct {
@@ -40,29 +54,71 @@ type CANStatsProvider struct {
 	SentFrames  *uint64
 	SentPkts    *uint64
 	WriteErrs   *uint64
+	Ifaces      []string
 
+	mu        sync.RWMutex
+	stats     CANStats
 	prevRecv0 uint64
 	prevRecv1 uint64
 }
 
-func (p *CANStatsProvider) Get() CANStats {
+// Start runs a background ticker that updates FPS and bitrate once per second.
+func (p *CANStatsProvider) Start(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.tick()
+		}
+	}
+}
+
+func (p *CANStatsProvider) tick() {
 	recv0 := atomic.LoadUint64(p.RecvFrames0)
 	recv1 := atomic.LoadUint64(p.RecvFrames1)
 
-	fps0 := recv0 - p.prevRecv0
-	fps1 := recv1 - p.prevRecv1
+	p.mu.Lock()
+	p.stats.Can0FPS = recv0 - p.prevRecv0
+	p.stats.Can1FPS = recv1 - p.prevRecv1
+	p.stats.Can0Total = recv0
+	p.stats.Can1Total = recv1
+	p.stats.UDPSentPkts = atomic.LoadUint64(p.SentPkts)
+	p.stats.UDPErrors = atomic.LoadUint64(p.WriteErrs)
+	p.stats.SentFrames = atomic.LoadUint64(p.SentFrames)
+
+	for i, iface := range p.Ifaces {
+		if info, err := candiag.GetCANInterfaceInfo(iface); err == nil {
+			if i == 0 {
+				p.stats.Can0Bitrate = info.Bitrate
+				p.stats.Can0State = info.State
+				p.stats.Can0SamplePt = info.SamplePoint
+				p.stats.Can0DBitrate = info.DBitrate
+				p.stats.Can0DSamplePt = info.DSamplePoint
+				p.stats.Can0BusState = info.BusState
+			} else if i == 1 {
+				p.stats.Can1Bitrate = info.Bitrate
+				p.stats.Can1State = info.State
+				p.stats.Can1SamplePt = info.SamplePoint
+				p.stats.Can1DBitrate = info.DBitrate
+				p.stats.Can1DSamplePt = info.DSamplePoint
+				p.stats.Can1BusState = info.BusState
+			}
+		}
+	}
+
 	p.prevRecv0 = recv0
 	p.prevRecv1 = recv1
+	p.mu.Unlock()
+}
 
-	return CANStats{
-		Can0FPS:     fps0,
-		Can0Total:   recv0,
-		Can1FPS:     fps1,
-		Can1Total:   recv1,
-		UDPSentPkts: atomic.LoadUint64(p.SentPkts),
-		UDPErrors:   atomic.LoadUint64(p.WriteErrs),
-		SentFrames:  atomic.LoadUint64(p.SentFrames),
-	}
+func (p *CANStatsProvider) Get() CANStats {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.stats
 }
 
 type Server struct {
@@ -108,12 +164,14 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/system/overview", s.handleSystemOverview)
 	mux.HandleFunc("/api/system/processes", s.handleProcesses)
 	mux.HandleFunc("/api/system/time", s.handleTime)
+	mux.HandleFunc("/api/system/dmesg", s.handleDmesg)
 	mux.HandleFunc("/api/system/poweroff", s.handlePoweroff)
 
 	// CAN APIs
 	mux.HandleFunc("/api/can/stats", s.handleCANStats)
 	mux.HandleFunc("/api/can/diagnostics", s.handleCANDiagnostics)
 	mux.HandleFunc("/api/can/details", s.handleCANDetails)
+	mux.HandleFunc("/api/can/configure", s.handleCANConfigure)
 
 	// WiFi APIs
 	mux.HandleFunc("/api/wifi/status", s.handleWiFiStatus)
@@ -232,6 +290,21 @@ func (s *Server) handleTime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.sysCollector.Time.Stats())
 }
 
+func (s *Server) handleDmesg(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeError(w, 405, "Method not allowed")
+		return
+	}
+
+	out, err := exec.Command("dmesg").CombinedOutput()
+	if err != nil {
+		writeError(w, 500, fmt.Sprintf("Failed to run dmesg: %v", err))
+		return
+	}
+
+	writeJSON(w, map[string]string{"dmesg": string(out)})
+}
+
 func (s *Server) handlePoweroff(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeError(w, 405, "Method not allowed")
@@ -310,6 +383,84 @@ func (s *Server) handleCANDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, info)
+}
+
+func (s *Server) handleCANConfigure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "Method not allowed")
+		return
+	}
+
+	var req struct {
+		Iface        string  `json:"interface"`
+		Bitrate      uint32  `json:"bitrate"`
+		SamplePoint  float64 `json:"samplePoint"`
+		DBitrate     uint32  `json:"dbitrate"`
+		DSamplePoint float64 `json:"dsamplePoint"`
+		FD           bool    `json:"fd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "Invalid request")
+		return
+	}
+
+	valid := false
+	for _, i := range s.canIfaces {
+		if i == req.Iface {
+			valid = true
+			break
+		}
+	}
+	if !valid {
+		writeError(w, 400, "Invalid interface")
+		return
+	}
+
+	if req.Bitrate == 0 {
+		writeError(w, 400, "Bitrate required")
+		return
+	}
+
+	// Build command: ip link set <iface> type can ...
+	cmdArgs := []string{"link", "set", req.Iface, "type", "can",
+		"bitrate", strconv.FormatUint(uint64(req.Bitrate), 10)}
+
+	if req.SamplePoint > 0 {
+		cmdArgs = append(cmdArgs, "sample-point", fmt.Sprintf("%.2f", req.SamplePoint))
+	}
+
+	if req.DBitrate > 0 {
+		cmdArgs = append(cmdArgs, "dbitrate", strconv.FormatUint(uint64(req.DBitrate), 10))
+		if req.DSamplePoint > 0 {
+			cmdArgs = append(cmdArgs, "dsample-point", fmt.Sprintf("%.2f", req.DSamplePoint))
+		}
+	}
+
+	if req.FD {
+		cmdArgs = append(cmdArgs, "fd", "on")
+	}
+
+	// Bring interface down
+	if out, err := exec.Command("ip", "link", "set", req.Iface, "down").CombinedOutput(); err != nil {
+		writeError(w, 500, fmt.Sprintf("Failed to bring interface down: %v (%s)", err, string(out)))
+		return
+	}
+
+	// Apply configuration
+	if out, err := exec.Command("ip", cmdArgs...).CombinedOutput(); err != nil {
+		// Attempt to bring it back up so we don't leave it down
+		exec.Command("ip", "link", "set", req.Iface, "up").Run()
+		writeError(w, 500, fmt.Sprintf("Failed to configure interface: %v (%s)", err, string(out)))
+		return
+	}
+
+	// Bring interface up
+	if out, err := exec.Command("ip", "link", "set", req.Iface, "up").CombinedOutput(); err != nil {
+		writeError(w, 500, fmt.Sprintf("Failed to bring interface up: %v (%s)", err, string(out)))
+		return
+	}
+
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // WiFi API handlers

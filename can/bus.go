@@ -4,11 +4,13 @@ package can
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"net"
 	"os"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,14 +27,15 @@ func min(a, b int) int {
 
 // Bus represents a CAN-FD bus interface
 type Bus struct {
-	file        *os.File
-	fd          int
-	sendQueue   chan *Message
-	stopSend    chan interface{}
-	recvQueue   chan *Message
-	running     bool
-	ctx         context.Context
-	cancel      context.CancelFunc
+	file         *os.File
+	fd           int
+	sendQueue    chan *Message
+	stopSend     chan interface{}
+	recvQueue    chan *Message
+	running      bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	shutdownOnce sync.Once
 	lastSendTime time.Time
 	minSendInterval time.Duration
 }
@@ -147,15 +150,17 @@ func NewBus(ifaceName string) (bus *Bus, err error) {
 
 // Shutdown gracefully shuts down the CAN bus
 func (b *Bus) Shutdown() {
-	b.cancel()
-	b.running = false
-	if b.file != nil {
-		// Shut down the socket first to unblock any pending Read/Write
-		unix.Shutdown(b.fd, unix.SHUT_RDWR)
-		b.file.Close()
-	}
-	// Close recvQueue so consumers can exit cleanly
-	close(b.recvQueue)
+	b.shutdownOnce.Do(func() {
+		b.cancel()
+		b.running = false
+		if b.file != nil {
+			// Shut down the socket first to unblock any pending Read/Write
+			unix.Shutdown(b.fd, unix.SHUT_RDWR)
+			b.file.Close()
+		}
+		// Close recvQueue so consumers can exit cleanly
+		close(b.recvQueue)
+	})
 }
 
 // ResetFilters resets CAN filters to allow all messages
@@ -243,6 +248,19 @@ func (b *Bus) recvLoop(ctx context.Context) {
 		n, err := b.file.Read(frame[:])
 
 		if err != nil {
+			if errors.Is(err, os.ErrClosed) {
+				return
+			}
+			// Fatal errors (e.g. interface down) should terminate the recvLoop
+			// so that the caller can recreate the bus.
+			var errno syscall.Errno
+			if errors.As(err, &errno) {
+				if errno == syscall.ENETDOWN || errno == syscall.ENETRESET || errno == syscall.ECONNRESET {
+					log.Printf("CAN interface error on %s: %v — shutting down bus", b.GetInterfaceName(), err)
+					b.Shutdown()
+					return
+				}
+			}
 			switch err.(type) {
 			case *fs.PathError:
 				// File closed, normal shutdown

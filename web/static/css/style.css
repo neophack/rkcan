@@ -532,13 +532,20 @@ select {
     color: var(--text-dim);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    margin-bottom: 2px;
+    margin-bottom: 4px;
+}
+.can-status-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 16px;
 }
 .can-status-line {
     display: flex;
     align-items: center;
     gap: 6px;
-    line-height: 1.4;
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
 }
 .can-status-label {
     font-size: 13px;
@@ -549,6 +556,27 @@ select {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-bright);
+}
+
+/* Interface toggle */
+.iface-toggle {
+    display: inline-flex;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+}
+.iface-toggle-option {
+    padding: 4px 14px;
+    color: var(--text-muted);
+    transition: background 0.15s, color 0.15s;
+}
+.iface-toggle-option.active {
+    background: var(--blue);
+    color: #fff;
 }
 
 /* CAN diagnostics */
@@ -697,6 +725,24 @@ select {
 .serial-config-row .form-group { margin-bottom: 0; flex: 1; min-width: 100px; }
 .serial-actions { display: flex; gap: 6px; margin-top: 10px; }
 
+/* CAN Bitrate Config */
+.can-config-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: flex-end;
+}
+.can-config-row .form-group {
+    margin-bottom: 0;
+    flex: 1 1 0;
+    min-width: 90px;
+    max-width: 140px;
+}
+.can-config-row .form-group .form-input,
+.can-config-row .form-group .form-select {
+    width: 100%;
+}
+
 .terminal-output {
     font-family: var(--mono);
     font-size: 13px;
@@ -711,6 +757,35 @@ select {
     line-height: 1.5;
 }
 .terminal-output .log-line { display: block; }
+
+/* Dmesg full-height output */
+#tab-dmesg {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+}
+#tab-dmesg.active {
+    display: flex;
+}
+#tab-dmesg .card {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 0;
+}
+#tab-dmesg .card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: 0;
+}
+#tab-dmesg .terminal-output.dmesg-output {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+}
 
 .serial-send-row {
     display: flex;

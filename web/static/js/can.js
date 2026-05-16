@@ -14,26 +14,84 @@ window.updateCANStats = (data) => {
     const can0State = document.getElementById('can0-state');
     const can0Bitrate = document.getElementById('can0-bitrate');
     if (can0State) {
+        const state = data.can0State || 'DOWN';
         const fps = data.can0Fps != null ? data.can0Fps : 0;
-        can0State.textContent = fps > 0 ? `UP (${formatNumber(fps)} fps)` : 'DOWN';
-        can0State.classList.toggle('text-ok', fps > 0);
-        can0State.classList.toggle('text-err', fps === 0);
+        if (state === 'UP' && fps > 0) {
+            can0State.textContent = `UP (${formatNumber(fps)} fps)`;
+        } else if (state === 'UP') {
+            can0State.textContent = 'UP';
+        } else {
+            can0State.textContent = 'DOWN';
+        }
+        can0State.classList.toggle('text-ok', state === 'UP');
+        can0State.classList.toggle('text-err', state !== 'UP');
     }
     if (can0Bitrate && data.can0Bitrate != null) {
         can0Bitrate.textContent = formatBitrateLabel(data.can0Bitrate);
+    }
+    const can0SamplePt = document.getElementById('can0-samplept');
+    if (can0SamplePt && data.can0SamplePt != null) {
+        can0SamplePt.textContent = (data.can0SamplePt * 100).toFixed(1) + ' %';
+    }
+    const can0DBitrate = document.getElementById('can0-dbitrate');
+    if (can0DBitrate && data.can0DBitrate != null) {
+        can0DBitrate.textContent = formatBitrateLabel(data.can0DBitrate);
+    }
+    const can0DSamplePt = document.getElementById('can0-dsamplept');
+    if (can0DSamplePt && data.can0DSamplePt != null) {
+        can0DSamplePt.textContent = (data.can0DSamplePt * 100).toFixed(1) + ' %';
+    }
+    const can0BusState = document.getElementById('can0-busstate');
+    if (can0BusState && data.can0BusState != null) {
+        can0BusState.textContent = data.can0BusState;
+        const st = data.can0BusState;
+        if (st === 'ERROR-ACTIVE') can0BusState.style.color = 'var(--green)';
+        else if (st.includes('WARNING')) can0BusState.style.color = 'var(--yellow)';
+        else if (st.includes('PASSIVE')) can0BusState.style.color = 'var(--orange)';
+        else if (st.includes('BUS-OFF') || st.includes('STOPPED')) can0BusState.style.color = 'var(--red)';
+        else can0BusState.style.color = '';
     }
 
     // -- CAN1 status cards --
     const can1State = document.getElementById('can1-state');
     const can1Bitrate = document.getElementById('can1-bitrate');
     if (can1State) {
+        const state = data.can1State || 'DOWN';
         const fps = data.can1Fps != null ? data.can1Fps : 0;
-        can1State.textContent = fps > 0 ? `UP (${formatNumber(fps)} fps)` : 'DOWN';
-        can1State.classList.toggle('text-ok', fps > 0);
-        can1State.classList.toggle('text-err', fps === 0);
+        if (state === 'UP' && fps > 0) {
+            can1State.textContent = `UP (${formatNumber(fps)} fps)`;
+        } else if (state === 'UP') {
+            can1State.textContent = 'UP';
+        } else {
+            can1State.textContent = 'DOWN';
+        }
+        can1State.classList.toggle('text-ok', state === 'UP');
+        can1State.classList.toggle('text-err', state !== 'UP');
     }
     if (can1Bitrate && data.can1Bitrate != null) {
         can1Bitrate.textContent = formatBitrateLabel(data.can1Bitrate);
+    }
+    const can1SamplePt = document.getElementById('can1-samplept');
+    if (can1SamplePt && data.can1SamplePt != null) {
+        can1SamplePt.textContent = (data.can1SamplePt * 100).toFixed(1) + ' %';
+    }
+    const can1DBitrate = document.getElementById('can1-dbitrate');
+    if (can1DBitrate && data.can1DBitrate != null) {
+        can1DBitrate.textContent = formatBitrateLabel(data.can1DBitrate);
+    }
+    const can1DSamplePt = document.getElementById('can1-dsamplept');
+    if (can1DSamplePt && data.can1DSamplePt != null) {
+        can1DSamplePt.textContent = (data.can1DSamplePt * 100).toFixed(1) + ' %';
+    }
+    const can1BusState = document.getElementById('can1-busstate');
+    if (can1BusState && data.can1BusState != null) {
+        can1BusState.textContent = data.can1BusState;
+        const st = data.can1BusState;
+        if (st === 'ERROR-ACTIVE') can1BusState.style.color = 'var(--green)';
+        else if (st.includes('WARNING')) can1BusState.style.color = 'var(--yellow)';
+        else if (st.includes('PASSIVE')) can1BusState.style.color = 'var(--orange)';
+        else if (st.includes('BUS-OFF') || st.includes('STOPPED')) can1BusState.style.color = 'var(--red)';
+        else can1BusState.style.color = '';
     }
 
     // -- CAN0 statistics table --
@@ -64,7 +122,7 @@ const setTxt = (id, val) => {
 
 const formatBitrateLabel = (bps) => {
     if (bps >= 1000000) return `${(bps / 1000000).toFixed(bps % 1000000 === 0 ? 0 : 1)} Mbit/s`;
-    if (bps >= 1000) return `${(bps / 1000).toFixed(bps % 1000 === 0 ? 0 : 3).replace(/\.?0+$/, '')} kbit/s`;
+    if (bps >= 1000) return `${(bps / 1000).toFixed(bps % 1000 === 0 ? 0 : 3).replace(/\.0+$/, '')} kbit/s`;
     return `${bps} bit/s`;
 };
 
@@ -115,7 +173,9 @@ const formatDiagnostics = (results, iface) => {
 /* ========================================================================== */
 
 const loadCANDetails = async () => {
-    const iface = document.getElementById('can-details-iface')?.value || 'can0';
+    const toggle = document.getElementById('can-details-iface-toggle');
+    const active = toggle?.querySelector('.iface-toggle-option.active');
+    const iface = active?.dataset.iface || 'can0';
     const body = document.getElementById('can-details-body');
     if (!body) return;
 
@@ -175,12 +235,12 @@ const renderCANDetails = (info) => {
         ${row('Controller', info.controller)}
         ${row('Restart-MS', info.restartMs)}
         ${row('Berr-Counter', info.berrTx != null ? `tx ${info.berrTx} / rx ${info.berrRx}` : '--')}
+        ${row('Clock', fmtClock(info.clock))}
     `;
 
     const nominal = `
         ${row('Bitrate', fmtBitrate(info.bitrate))}
         ${row('Sample Point', info.samplePoint != null ? `${(info.samplePoint * 100).toFixed(1)} %` : '--')}
-        ${row('Clock', fmtClock(info.clock))}
         ${row('TQ', info.tq)}
         ${row('Prop-Seg', info.propSeg)}
         ${row('Phase-Seg1', info.phaseSeg1)}
@@ -209,13 +269,61 @@ const renderCANDetails = (info) => {
 /*  Event Wiring                                                               */
 /* ========================================================================== */
 
+const applyCANConfig = async () => {
+    const iface = document.getElementById('can-cfg-iface')?.value || 'can0';
+    const bitrate = parseInt(document.getElementById('can-cfg-bitrate')?.value || '0', 10);
+    const sp = parseFloat(document.getElementById('can-cfg-sp')?.value || '0');
+    const dbitrate = parseInt(document.getElementById('can-cfg-dbitrate')?.value || '0', 10);
+    const dsp = parseFloat(document.getElementById('can-cfg-dsp')?.value || '0');
+    const fd = document.getElementById('can-cfg-fd')?.checked ?? true;
+
+    if (!bitrate || bitrate <= 0) {
+        window.showToast('Bitrate is required', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('can-cfg-apply');
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying...'; }
+
+    try {
+        await window.api('/api/can/configure', {
+            method: 'POST',
+            body: JSON.stringify({
+                interface: iface,
+                bitrate: bitrate,
+                samplePoint: sp,
+                dbitrate: dbitrate,
+                dsamplePoint: dsp,
+                fd: fd
+            })
+        });
+        window.showToast('CAN configuration applied. Interface restarted.', 'success');
+    } catch (err) {
+        // api() already shows toast on error
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Apply & Restart'; }
+    }
+};
+
 const wireEvents = () => {
     // Diagnostics refresh button
     document.getElementById('can-diag-refresh')?.addEventListener('click', loadDiagnostics);
 
     // CAN Details
     document.getElementById('can-details-refresh')?.addEventListener('click', loadCANDetails);
-    document.getElementById('can-details-iface')?.addEventListener('change', loadCANDetails);
+    const toggle = document.getElementById('can-details-iface-toggle');
+    if (toggle) {
+        toggle.addEventListener('click', (e) => {
+            const opt = e.target.closest('.iface-toggle-option');
+            if (!opt) return;
+            toggle.querySelectorAll('.iface-toggle-option').forEach((el) => el.classList.remove('active'));
+            opt.classList.add('active');
+            loadCANDetails();
+        });
+    }
+
+    // Bitrate Configuration
+    document.getElementById('can-cfg-apply')?.addEventListener('click', applyCANConfig);
 };
 
 /* ========================================================================== */

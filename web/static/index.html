@@ -41,6 +41,16 @@
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
       </svg>
     </div>
+    <div class="sidebar-icon" data-tab="dmesg" data-tooltip="Dmesg">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+        <line x1="8" y1="21" x2="16" y2="21"/>
+        <line x1="12" y1="17" x2="12" y2="21"/>
+        <line x1="6" y1="8" x2="6" y2="8"/>
+        <line x1="6" y1="12" x2="10" y2="12"/>
+        <line x1="14" y1="12" x2="18" y2="12"/>
+      </svg>
+    </div>
   </div>
 
   <!-- Main Area -->
@@ -150,13 +160,31 @@
             </div>
             <div class="can-status-body">
               <div class="can-status-title">CAN0</div>
-              <div class="can-status-line">
-                <span class="can-status-label">State:</span>
-                <span class="can-status-value" id="can0-state">DOWN</span>
-              </div>
-              <div class="can-status-line">
-                <span class="can-status-label">Bitrate:</span>
-                <span class="can-status-value" id="can0-bitrate">--</span>
+              <div class="can-status-grid">
+                <div class="can-status-line">
+                  <span class="can-status-label">State:</span>
+                  <span class="can-status-value" id="can0-state">DOWN</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Bus State:</span>
+                  <span class="can-status-value" id="can0-busstate">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Bitrate:</span>
+                  <span class="can-status-value" id="can0-bitrate">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Data Rate:</span>
+                  <span class="can-status-value" id="can0-dbitrate">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Sample Pt:</span>
+                  <span class="can-status-value" id="can0-samplept">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Data Sample:</span>
+                  <span class="can-status-value" id="can0-dsamplept">--</span>
+                </div>
               </div>
             </div>
           </div>
@@ -166,13 +194,31 @@
             </div>
             <div class="can-status-body">
               <div class="can-status-title">CAN1</div>
-              <div class="can-status-line">
-                <span class="can-status-label">State:</span>
-                <span class="can-status-value" id="can1-state">DOWN</span>
-              </div>
-              <div class="can-status-line">
-                <span class="can-status-label">Bitrate:</span>
-                <span class="can-status-value" id="can1-bitrate">--</span>
+              <div class="can-status-grid">
+                <div class="can-status-line">
+                  <span class="can-status-label">State:</span>
+                  <span class="can-status-value" id="can1-state">DOWN</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Bus State:</span>
+                  <span class="can-status-value" id="can1-busstate">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Bitrate:</span>
+                  <span class="can-status-value" id="can1-bitrate">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Data Rate:</span>
+                  <span class="can-status-value" id="can1-dbitrate">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Sample Pt:</span>
+                  <span class="can-status-value" id="can1-samplept">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">Data Sample:</span>
+                  <span class="can-status-value" id="can1-dsamplept">--</span>
+                </div>
               </div>
             </div>
           </div>
@@ -182,16 +228,51 @@
           <div class="card-header">
             CAN Details
             <div class="card-header-actions">
-              <select id="can-details-iface" class="form-select" style="width:auto;min-width:80px;">
-                <option value="can0">can0</option>
-                <option value="can1">can1</option>
-              </select>
+              <div class="iface-toggle" id="can-details-iface-toggle">
+                <span class="iface-toggle-option active" data-iface="can0">can0</span>
+                <span class="iface-toggle-option" data-iface="can1">can1</span>
+              </div>
               <button class="btn btn-sm btn-primary" id="can-details-refresh">Refresh</button>
             </div>
           </div>
           <div class="card-body">
             <div class="can-details-grid" id="can-details-body">
               <div class="can-details-placeholder">Click Refresh to load interface details...</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">Bitrate Configuration</div>
+          <div class="card-body">
+            <div class="can-config-row">
+              <div class="form-group">
+                <label>Interface</label>
+                <select id="can-cfg-iface" class="form-select">
+                  <option value="can0">can0</option>
+                  <option value="can1">can1</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Bitrate (bps)</label>
+                <input type="number" id="can-cfg-bitrate" class="form-input" value="500000">
+              </div>
+              <div class="form-group">
+                <label>Sample Point</label>
+                <input type="number" id="can-cfg-sp" class="form-input" value="0.875" step="0.01" min="0.5" max="0.99">
+              </div>
+              <div class="form-group">
+                <label>Data Bitrate (bps)</label>
+                <input type="number" id="can-cfg-dbitrate" class="form-input" value="2000000">
+              </div>
+              <div class="form-group">
+                <label>Data Sample Point</label>
+                <input type="number" id="can-cfg-dsp" class="form-input" value="0.80" step="0.01" min="0.5" max="0.99">
+              </div>
+              <div class="form-group">
+                <label class="checkbox-label" style="margin-top:18px;"><input type="checkbox" id="can-cfg-fd" checked> CAN-FD</label>
+              </div>
+              <button class="btn btn-sm btn-primary" id="can-cfg-apply" style="margin-bottom:1px;">Apply & Restart</button>
             </div>
           </div>
         </div>
@@ -450,6 +531,22 @@
         </div>
       </div>
 
+      <!-- ==================== Dmesg Tab ==================== -->
+      <div id="tab-dmesg" class="tab-panel">
+        <div class="card card-grow">
+          <div class="card-header">
+            Kernel Message Log (dmesg)
+            <div class="card-header-actions">
+              <button class="btn btn-sm btn-primary" id="dmesg-refresh-btn">Refresh</button>
+              <button class="btn btn-sm" id="dmesg-clear-btn">Clear</button>
+            </div>
+          </div>
+          <div class="card-body card-body-terminal">
+            <pre class="terminal-output dmesg-output" id="dmesg-output">Click Refresh to load dmesg...</pre>
+          </div>
+        </div>
+      </div>
+
     </div><!-- /content -->
 
     <!-- Status Bar -->
@@ -497,5 +594,6 @@
 <script src="js/wifi.js"></script>
 <script src="js/serial.js"></script>
 <script src="js/files.js"></script>
+<script src="js/dmesg.js"></script>
 </body>
 </html>

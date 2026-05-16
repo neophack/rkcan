@@ -167,6 +167,15 @@ func (m *Manager) connectNmcli(ssid, password string) error {
 	return nil
 }
 
+func rssiToPercent(rssi int) int {
+	if rssi >= -50 {
+		return 100
+	} else if rssi <= -100 {
+		return 0
+	}
+	return 2 * (rssi + 100)
+}
+
 func (m *Manager) statusNmcli() (*Status, error) {
 	out, err := exec.Command("nmcli", "-t", "-f",
 		"GENERAL.STATE,GENERAL.CONNECTION,WIRED-PROPERTIES.CARRIER,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS,WIFI.SSID,WIFI.SIGNAL,WIFI.FREQ",
@@ -193,6 +202,10 @@ func (m *Manager) statusNmcli() (*Status, error) {
 			s.Gateway = val
 		case "IP4.DNS[1]":
 			s.DNS = val
+		case "WIFI.SIGNAL":
+			s.Signal, _ = strconv.Atoi(val)
+		case "WIFI.FREQ":
+			s.Frequency = val
 		}
 	}
 	if s.Connected && s.Gateway == "" {
@@ -409,6 +422,41 @@ func (m *Manager) statusWpaCli() (*Status, error) {
 			s.MAC = parts[1]
 		}
 	}
+
+	// wpa_cli status does not return signal strength; fetch it separately
+	if s.Connected {
+		out2, err := exec.Command("wpa_cli", "-i", m.iface, "signal_poll").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out2), "\n") {
+				parts := strings.SplitN(line, "=", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				if parts[0] == "RSSI" {
+					rssi, _ := strconv.Atoi(parts[1])
+					s.Signal = rssiToPercent(rssi)
+					break
+				}
+			}
+		}
+		// Fallback to iw if signal_poll failed
+		if s.Signal == 0 {
+			out3, err := exec.Command("iw", "dev", m.iface, "link").Output()
+			if err == nil {
+				for _, line := range strings.Split(string(out3), "\n") {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "signal: ") {
+						sigStr := strings.TrimPrefix(line, "signal: ")
+						sigStr = strings.Fields(sigStr)[0]
+						signal, _ := strconv.ParseFloat(sigStr, 64)
+						s.Signal = rssiToPercent(int(signal))
+						break
+					}
+				}
+			}
+		}
+	}
+
 	if s.Connected && s.Gateway == "" {
 		s.Gateway = getDefaultGateway(m.iface)
 	}
