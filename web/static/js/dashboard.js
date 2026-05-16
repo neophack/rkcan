@@ -119,6 +119,19 @@
             }
             setText('metric-net', '\u2193' + formatSpeed(totalRx) + ' \u2191' + formatSpeed(totalTx));
         }
+        if (data.disk && data.disk.disks && data.disk.disks.length > 0) {
+            var rootDisk = null;
+            for (var i = 0; i < data.disk.disks.length; i++) {
+                if (data.disk.disks[i].mountedOn === '/') {
+                    rootDisk = data.disk.disks[i];
+                    break;
+                }
+            }
+            if (!rootDisk) {
+                rootDisk = data.disk.disks[0];
+            }
+            setText('metric-disk', formatBytes(rootDisk.used) + ' / ' + formatBytes(rootDisk.total));
+        }
     }
 
     function updateTimeDisplay(data) {

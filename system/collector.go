@@ -15,6 +15,7 @@ type Collector struct {
 	Temp *TempCollector
 	Time *TimeCollector
 	Proc *ProcessCollector
+	Disk *DiskCollector
 
 	mu      sync.RWMutex
 	uptime  float64
@@ -29,6 +30,7 @@ func NewCollector() *Collector {
 		Temp: NewTempCollector(),
 		Time: NewTimeCollector(),
 		Proc: NewProcessCollector(),
+		Disk: NewDiskCollector(),
 	}
 }
 
@@ -50,6 +52,7 @@ func (c *Collector) Start(ctx context.Context) {
 			c.Mem.Collect()
 			c.Net.Collect()
 			c.Time.Collect()
+			c.Disk.Collect()
 
 			c.mu.Lock()
 			c.uptime = readUptime()
@@ -70,6 +73,7 @@ func (c *Collector) collectAll() {
 	c.Temp.Collect()
 	c.Time.Collect()
 	c.Proc.Collect()
+	c.Disk.Collect()
 
 	c.mu.Lock()
 	c.uptime = readUptime()
@@ -86,6 +90,7 @@ type SystemOverview struct {
 	Time        TimeStats    `json:"time"`
 	Uptime      string       `json:"uptime"`
 	LoadAvg     string       `json:"loadAvg"`
+	Disk        DiskStats    `json:"disk"`
 }
 
 func (c *Collector) Overview() SystemOverview {
@@ -103,5 +108,6 @@ func (c *Collector) Overview() SystemOverview {
 		Time:        c.Time.Stats(),
 		Uptime:      formatUptime(uptime),
 		LoadAvg:     loadAvg,
+		Disk:        c.Disk.Stats(),
 	}
 }
