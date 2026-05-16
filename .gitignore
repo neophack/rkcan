@@ -3,3 +3,4 @@ rkcan-linux-arm32
 
 # Accidental generated files
 UDP
+chrony_build/out/
