@@ -5,6 +5,7 @@ package system
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -14,13 +15,15 @@ import (
 )
 
 type TimeStats struct {
-	SystemTime   string  `json:"systemTime"`
-	SystemUnixMs int64   `json:"systemUnixMs"`
-	PHCTime      string  `json:"phcTime"`
-	PHCUnixMs    int64   `json:"phcUnixMs"`
-	OffsetUs     int64   `json:"offsetUs"`
-	PHCAvailable bool    `json:"phcAvailable"`
-	FreqPPB      float64 `json:"freqPPB"`
+	SystemTime       string  `json:"systemTime"`
+	SystemUnixMs     int64   `json:"systemUnixMs"`
+	PHCTime          string  `json:"phcTime"`
+	PHCUnixMs        int64   `json:"phcUnixMs"`
+	OffsetUs         int64   `json:"offsetUs"`
+	PHCAvailable     bool    `json:"phcAvailable"`
+	FreqPPB          float64 `json:"freqPPB"`
+	ChronyLeapStatus string  `json:"chronyLeapStatus"`
+	ChronyStratum    int     `json:"chronyStratum"`
 }
 
 type TimeCollector struct {
@@ -61,6 +64,28 @@ type ptpClockTime struct {
 	_    uint32
 }
 
+func getChronyTracking() (leapStatus string, stratum int) {
+	out, err := exec.Command("/userdata/chronyc", "tracking").CombinedOutput()
+	if err != nil {
+		return "N/A", 0
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if idx := strings.Index(line, ":"); idx > 0 {
+			key := strings.TrimSpace(line[:idx])
+			val := strings.TrimSpace(line[idx+1:])
+			switch key {
+			case "Stratum":
+				fmt.Sscanf(val, "%d", &stratum)
+			case "Leap status":
+				leapStatus = val
+			}
+		}
+	}
+	return
+}
+
 func (c *TimeCollector) Collect() {
 	now := time.Now()
 
@@ -70,6 +95,11 @@ func (c *TimeCollector) Collect() {
 	c.stats.SystemTime = now.Format("2006-01-02 15:04:05.000")
 	c.stats.SystemUnixMs = now.UnixMilli()
 	c.stats.PHCAvailable = c.phcAvail
+
+	// Update chrony status
+	leapStatus, stratum := getChronyTracking()
+	c.stats.ChronyLeapStatus = leapStatus
+	c.stats.ChronyStratum = stratum
 
 	if c.phcAvail && c.phcFd >= 0 {
 		var pct ptpClockTime

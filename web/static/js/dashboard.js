@@ -138,17 +138,24 @@
         if (!data.time) return;
 
         setText('system-time', data.time.systemTime || '--:--:--');
-        setText('phc-time', data.time.phcAvailable ? (data.time.phcTime || 'N/A') : 'N/A');
 
-        var deltaEl = document.getElementById('time-delta');
-        if (deltaEl && data.time.offsetUs !== undefined) {
-            var absOffset = Math.abs(data.time.offsetUs);
-            var color;
-            if (absOffset < 100) color = '#14b8a6';
-            else if (absOffset < 1000) color = '#eab308';
-            else color = '#ef4444';
-            deltaEl.textContent = data.time.offsetUs.toFixed(1) + ' \u00B5s';
-            deltaEl.style.color = color;
+        var syncEl = document.getElementById('chrony-sync-status');
+        if (syncEl && data.time.chronyLeapStatus) {
+            var status = data.time.chronyLeapStatus;
+            syncEl.textContent = status;
+            if (status === 'Normal') {
+                syncEl.style.color = '#14b8a6';
+            } else if (status === 'Not synchronised') {
+                syncEl.style.color = '#ef4444';
+            } else {
+                syncEl.style.color = '#eab308';
+            }
+        }
+
+        var stratumEl = document.getElementById('chrony-stratum-dash');
+        if (stratumEl && data.time.chronyStratum != null) {
+            stratumEl.textContent = String(data.time.chronyStratum);
+            stratumEl.style.color = '';
         }
     }
 
