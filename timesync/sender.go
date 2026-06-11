@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/penghongxia/rkcan/can"
 	"golang.org/x/sys/unix"
 )
 
@@ -211,6 +212,7 @@ func (s *Sender) run(ctx context.Context, iface string, protocol Protocol) {
 	defer ticker.Stop()
 
 	var seq uint8
+	consecutiveSendFailures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -224,7 +226,38 @@ func (s *Sender) run(ctx context.Context, iface string, protocol Protocol) {
 				if ctx.Err() != nil {
 					return // cancelled, not a real error
 				}
+				consecutiveSendFailures++
 				log.Printf("timesync: send error on %s: %v", iface, err)
+				if consecutiveSendFailures > 3 {
+					log.Printf("timesync: send failed %d times on %s, restarting interface", consecutiveSendFailures, iface)
+					if restartErr := can.RestartInterface(iface); restartErr != nil {
+						log.Printf("timesync: interface restart failed on %s: %v", iface, restartErr)
+					} else {
+						log.Printf("timesync: interface restarted on %s after send failures", iface)
+						consecutiveSendFailures = 0
+					}
+				}
+			} else {
+				healthy, state, healthErr := can.InterfaceHealthy(iface)
+				if healthErr != nil {
+					consecutiveSendFailures++
+					log.Printf("timesync: health check failed on %s: %v", iface, healthErr)
+				} else if !healthy {
+					consecutiveSendFailures++
+					log.Printf("timesync: interface unhealthy on %s after write: %s", iface, state)
+				} else {
+					consecutiveSendFailures = 0
+				}
+
+				if consecutiveSendFailures > 3 {
+					log.Printf("timesync: send health check failed %d times on %s, restarting interface", consecutiveSendFailures, iface)
+					if restartErr := can.RestartInterface(iface); restartErr != nil {
+						log.Printf("timesync: interface restart failed on %s: %v", iface, restartErr)
+					} else {
+						log.Printf("timesync: interface restarted on %s after health check failures", iface)
+						consecutiveSendFailures = 0
+					}
+				}
 			}
 			seq = (seq + 1) & 0x0F
 		}

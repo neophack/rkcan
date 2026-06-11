@@ -27,17 +27,21 @@ func min(a, b int) int {
 
 // Bus represents a CAN-FD bus interface
 type Bus struct {
-	file         *os.File
-	fd           int
-	sendQueue    chan *Message
-	stopSend     chan interface{}
-	recvQueue    chan *Message
-	running      bool
-	ctx          context.Context
-	cancel       context.CancelFunc
-	shutdownOnce sync.Once
-	lastSendTime time.Time
-	minSendInterval time.Duration
+	file                    *os.File
+	fd                      int
+	ifaceName               string
+	sendQueue               chan *Message
+	stopSend                chan interface{}
+	recvQueue               chan *Message
+	running                 bool
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	shutdownOnce            sync.Once
+	lastSendTime            time.Time
+	lastHealthCheck         time.Time
+	minSendInterval         time.Duration
+	healthCheckInterval     time.Duration
+	consecutiveSendFailures int
 }
 
 // NewBus creates a new CAN-FD bus instance for the specified interface
@@ -130,15 +134,17 @@ func NewBus(ifaceName string) (bus *Bus, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	file := os.NewFile(uintptr(fd), ifaceName)
 	bus = &Bus{
-		file:            file,
-		fd:              fd,
-		sendQueue:       make(chan *Message, 10000),
-		stopSend:        make(chan interface{}),
-		running:         true,
-		recvQueue:       make(chan *Message, 200000),
-		ctx:             ctx,
-		cancel:          cancel,
-		minSendInterval: 500 * time.Microsecond, // Minimum 500µs between sends
+		file:                file,
+		fd:                  fd,
+		ifaceName:           ifaceName,
+		sendQueue:           make(chan *Message, 10000),
+		stopSend:            make(chan interface{}),
+		running:             true,
+		recvQueue:           make(chan *Message, 200000),
+		ctx:                 ctx,
+		cancel:              cancel,
+		minSendInterval:     500 * time.Microsecond, // Minimum 500µs between sends
+		healthCheckInterval: 250 * time.Millisecond,
 	}
 
 	// Start receiving and sending loops
@@ -332,10 +338,17 @@ func (b *Bus) sendLoop(ctx context.Context) {
 			// Linux SocketCAN expects the complete frame structure
 			err = b.writeFrameWithRetry(frame[:])
 			if err != nil {
-				log.Printf("CAN write error after retries: %v", err)
+				b.noteSendFailure("write error after retries", err)
 				// Don't panic, just log and continue
 				continue
 			}
+
+			if err := b.verifyInterfaceHealthy(); err != nil {
+				b.noteSendFailure("post-write health check failed", err)
+				continue
+			}
+
+			b.consecutiveSendFailures = 0
 		}
 	}
 }
@@ -378,13 +391,47 @@ func (b *Bus) writeFrameWithRetry(frame []byte) error {
 	return fmt.Errorf("max retries exceeded")
 }
 
+func (b *Bus) verifyInterfaceHealthy() error {
+	if time.Since(b.lastHealthCheck) < b.healthCheckInterval {
+		return nil
+	}
+	b.lastHealthCheck = time.Now()
+
+	healthy, state, err := InterfaceHealthy(b.ifaceName)
+	if err != nil {
+		return err
+	}
+	if healthy {
+		return nil
+	}
+	return fmt.Errorf("interface state is %s", state)
+}
+
+func (b *Bus) noteSendFailure(reason string, err error) {
+	b.consecutiveSendFailures++
+	log.Printf("CAN send failure on %s: %s: %v", b.ifaceName, reason, err)
+	if b.consecutiveSendFailures <= 3 {
+		return
+	}
+
+	log.Printf("CAN send failed %d times on %s, restarting interface", b.consecutiveSendFailures, b.ifaceName)
+	if restartErr := RestartInterface(b.ifaceName); restartErr != nil {
+		log.Printf("CAN interface restart failed on %s: %v", b.ifaceName, restartErr)
+		return
+	}
+
+	log.Printf("CAN interface restarted on %s after send failures", b.ifaceName)
+	b.consecutiveSendFailures = 0
+	b.lastHealthCheck = time.Time{}
+}
+
 // isBufferFullError checks if the error indicates buffer space issues
 func isBufferFullError(err error) bool {
 	// Check for common buffer full error messages
 	errStr := err.Error()
-	return errStr == "no buffer space available" || 
-		   errStr == "resource temporarily unavailable" ||
-		   errStr == "would block"
+	return errStr == "no buffer space available" ||
+		errStr == "resource temporarily unavailable" ||
+		errStr == "would block"
 }
 
 // SetMinSendInterval sets the minimum time interval between CAN frame transmissions
@@ -404,6 +451,9 @@ func (b *Bus) IsRunning() bool {
 
 // GetInterfaceName returns the name of the CAN interface
 func (b *Bus) GetInterfaceName() string {
+	if b.ifaceName != "" {
+		return b.ifaceName
+	}
 	if b.file != nil {
 		return b.file.Name()
 	}
