@@ -68,7 +68,7 @@
         <div class="time-row">
           <div class="time-card">
             <span class="time-label">System Time</span>
-            <span class="time-value" id="system-time">--:--:--</span>
+            <span class="time-value" id="system-time" style="display:inline;">--:--:--</span><button class="btn btn-sm btn-primary" id="settime-btn" title="NTP方式同步PC时间到开发板" style="margin-left:8px;padding:1px 8px;font-size:12px;">同步PC</button>
           </div>
           <div class="time-card">
             <span class="time-label">NTP Status</span>
@@ -288,6 +288,36 @@
                 <label class="checkbox-label" style="margin-top:18px;"><input type="checkbox" id="can-cfg-fd" checked> CAN-FD</label>
               </div>
               <button class="btn btn-sm btn-primary" id="can-cfg-apply" style="margin-bottom:1px;">Apply & Restart</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            时间同步发送 (CAN ID: 0x5A4)
+            <span class="card-header-badge" id="timesync-status-badge">已停止</span>
+          </div>
+          <div class="card-body">
+            <div class="can-config-row" style="align-items:flex-end;gap:16px;">
+              <div class="form-group">
+                <label>CAN 接口</label>
+                <select id="timesync-iface" class="form-select">
+                  <option value="can0">can0</option>
+                  <option value="can1">can1</option>
+                </select>
+              </div>
+              <div class="form-group" style="display:flex;align-items:center;gap:10px;margin-bottom:1px;">
+                <label class="switch-label">
+                  <span>发送开关</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="timesync-enable-toggle">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </label>
+              </div>
+            </div>
+            <div style="margin-top:8px;font-size:12px;color:var(--text-muted);">
+              每 500 ms 向选定接口发送一对时间同步帧，将系统 UTC 时间同步给 CAN 总线上的其他设备。
             </div>
           </div>
         </div>

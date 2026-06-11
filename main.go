@@ -22,6 +22,7 @@ import (
 	"github.com/penghongxia/rkcan/filemanager"
 	"github.com/penghongxia/rkcan/serial"
 	"github.com/penghongxia/rkcan/system"
+	"github.com/penghongxia/rkcan/timesync"
 	"github.com/penghongxia/rkcan/web"
 	"github.com/penghongxia/rkcan/wifi"
 )
@@ -356,6 +357,9 @@ func main() {
 	// File manager
 	fileMgr := filemanager.NewManager(*fileRoot)
 
+	// CAN time sync sender
+	timeSyncSender := timesync.NewSender()
+
 	// CAN stats provider for web dashboard
 	canStats := &web.CANStatsProvider{
 		RecvFrames0: &sender.recvFrames0,
@@ -369,13 +373,14 @@ func main() {
 
 	// Web server
 	webServer := web.NewServer(web.ServerConfig{
-		Port:         *webPort,
-		SysCollector: sysCollector,
-		CANStats:     canStats,
-		WifiMgr:      wifiMgr,
-		SerialReader: serialReader,
-		FileMgr:      fileMgr,
-		CANIfaces:    []string{*can0Iface, *can1Iface},
+		Port:           *webPort,
+		SysCollector:   sysCollector,
+		CANStats:       canStats,
+		WifiMgr:        wifiMgr,
+		SerialReader:   serialReader,
+		FileMgr:        fileMgr,
+		CANIfaces:      []string{*can0Iface, *can1Iface},
+		TimeSyncSender: timeSyncSender,
 	})
 
 	go func() {

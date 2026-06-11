@@ -159,11 +159,11 @@ var updateStatusBar = function (data) {
     if (data.can) {
         var can0El = document.getElementById('status-can0');
         var can1El = document.getElementById('status-can1');
-        if (can0El && data.can.can0Fps != null) {
-            can0El.textContent = 'CAN0: ' + data.can.can0Fps + ' fps';
+        if (can0El && data.can.can0RxFps != null) {
+            can0El.textContent = 'CAN0 RX:' + data.can.can0RxFps + ' TX:' + (data.can.can0TxFps || 0) + ' fps';
         }
-        if (can1El && data.can.can1Fps != null) {
-            can1El.textContent = 'CAN1: ' + data.can.can1Fps + ' fps';
+        if (can1El && data.can.can1RxFps != null) {
+            can1El.textContent = 'CAN1 RX:' + data.can.can1RxFps + ' TX:' + (data.can.can1TxFps || 0) + ' fps';
         }
     }
 };

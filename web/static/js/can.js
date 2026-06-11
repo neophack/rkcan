@@ -15,9 +15,10 @@ window.updateCANStats = (data) => {
     const can0Bitrate = document.getElementById('can0-bitrate');
     if (can0State) {
         const state = data.can0State || 'DOWN';
-        const fps = data.can0Fps != null ? data.can0Fps : 0;
-        if (state === 'UP' && fps > 0) {
-            can0State.textContent = `UP (${formatNumber(fps)} fps)`;
+        const rxFps = data.can0RxFps != null ? data.can0RxFps : 0;
+        const txFps = data.can0TxFps != null ? data.can0TxFps : 0;
+        if (state === 'UP' && (rxFps > 0 || txFps > 0)) {
+            can0State.textContent = `UP  RX:${formatNumber(rxFps)}  TX:${formatNumber(txFps)} fps`;
         } else if (state === 'UP') {
             can0State.textContent = 'UP';
         } else {
@@ -57,9 +58,10 @@ window.updateCANStats = (data) => {
     const can1Bitrate = document.getElementById('can1-bitrate');
     if (can1State) {
         const state = data.can1State || 'DOWN';
-        const fps = data.can1Fps != null ? data.can1Fps : 0;
-        if (state === 'UP' && fps > 0) {
-            can1State.textContent = `UP (${formatNumber(fps)} fps)`;
+        const rxFps = data.can1RxFps != null ? data.can1RxFps : 0;
+        const txFps = data.can1TxFps != null ? data.can1TxFps : 0;
+        if (state === 'UP' && (rxFps > 0 || txFps > 0)) {
+            can1State.textContent = `UP  RX:${formatNumber(rxFps)}  TX:${formatNumber(txFps)} fps`;
         } else if (state === 'UP') {
             can1State.textContent = 'UP';
         } else {
@@ -266,6 +268,51 @@ const renderCANDetails = (info) => {
 };
 
 /* ========================================================================== */
+/*  CAN Time Sync                                                              */
+/* ========================================================================== */
+
+const updateTimeSyncBadge = (enabled, iface) => {
+    const badge = document.getElementById('timesync-status-badge');
+    if (!badge) return;
+    badge.className = 'card-header-badge ' + (enabled ? 'timesync-badge-running' : 'timesync-badge-stopped');
+    badge.textContent = enabled ? `运行中 (${iface})` : '已停止';
+};
+
+const loadTimeSyncStatus = async () => {
+    try {
+        const data = await window.api('/api/can/timesync');
+        const toggle = document.getElementById('timesync-enable-toggle');
+        const ifaceEl = document.getElementById('timesync-iface');
+        if (toggle) toggle.checked = data.enabled;
+        if (ifaceEl && data.iface) ifaceEl.value = data.iface;
+        updateTimeSyncBadge(data.enabled, data.iface);
+    } catch {
+        // Non-critical, ignore
+    }
+};
+
+const applyTimeSyncConfig = async () => {
+    const enabled = document.getElementById('timesync-enable-toggle')?.checked ?? false;
+    const iface = document.getElementById('timesync-iface')?.value || 'can0';
+
+    try {
+        const data = await window.api('/api/can/timesync', {
+            method: 'POST',
+            body: JSON.stringify({ enabled, iface })
+        });
+        updateTimeSyncBadge(data.enabled, data.iface);
+        const msg = data.enabled
+            ? `时间同步已在 ${data.iface} 上启动`
+            : '时间同步已停止';
+        window.showToast(msg, data.enabled ? 'success' : 'info');
+    } catch {
+        // api() already shows error toast; revert toggle
+        const toggle = document.getElementById('timesync-enable-toggle');
+        if (toggle) toggle.checked = !enabled;
+    }
+};
+
+/* ========================================================================== */
 /*  Event Wiring                                                               */
 /* ========================================================================== */
 
@@ -324,6 +371,20 @@ const wireEvents = () => {
 
     // Bitrate Configuration
     document.getElementById('can-cfg-apply')?.addEventListener('click', applyCANConfig);
+
+    // Time Sync toggle
+    const timeSyncToggle = document.getElementById('timesync-enable-toggle');
+    if (timeSyncToggle) {
+        timeSyncToggle.addEventListener('change', applyTimeSyncConfig);
+    }
+    const timeSyncIface = document.getElementById('timesync-iface');
+    if (timeSyncIface) {
+        timeSyncIface.addEventListener('change', () => {
+            if (document.getElementById('timesync-enable-toggle')?.checked) {
+                applyTimeSyncConfig();
+            }
+        });
+    }
 };
 
 /* ========================================================================== */
@@ -333,6 +394,7 @@ const wireEvents = () => {
 window.initCAN = () => {
     loadDiagnostics();
     loadCANDetails();
+    loadTimeSyncStatus();
 };
 
 // Wire up events immediately when DOM is ready; register lazy init for tab switch.

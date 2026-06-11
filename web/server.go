@@ -22,6 +22,7 @@ import (
 	"github.com/penghongxia/rkcan/filemanager"
 	"github.com/penghongxia/rkcan/serial"
 	"github.com/penghongxia/rkcan/system"
+	"github.com/penghongxia/rkcan/timesync"
 	"github.com/penghongxia/rkcan/wifi"
 )
 
@@ -29,25 +30,27 @@ import (
 var staticFiles embed.FS
 
 type CANStats struct {
-	Can0FPS        uint64  `json:"can0Fps"`
-	Can0Total      uint64  `json:"can0Total"`
-	Can0Bitrate    uint32  `json:"can0Bitrate"`
-	Can0State      string  `json:"can0State"`
-	Can0SamplePt   float64 `json:"can0SamplePt"`
-	Can0DBitrate   uint32  `json:"can0DBitrate"`
-	Can0DSamplePt  float64 `json:"can0DSamplePt"`
-	Can0BusState   string  `json:"can0BusState"`
-	Can1FPS        uint64  `json:"can1Fps"`
-	Can1Total      uint64  `json:"can1Total"`
-	Can1Bitrate    uint32  `json:"can1Bitrate"`
-	Can1State      string  `json:"can1State"`
-	Can1SamplePt   float64 `json:"can1SamplePt"`
-	Can1DBitrate   uint32  `json:"can1DBitrate"`
-	Can1DSamplePt  float64 `json:"can1DSamplePt"`
-	Can1BusState   string  `json:"can1BusState"`
-	UDPSentPkts    uint64  `json:"udpSentPkts"`
-	UDPErrors      uint64  `json:"udpErrors"`
-	SentFrames     uint64  `json:"sentFrames"`
+	Can0RxFPS     uint64  `json:"can0RxFps"`
+	Can0TxFPS     uint64  `json:"can0TxFps"`
+	Can0Total     uint64  `json:"can0Total"`
+	Can0Bitrate   uint32  `json:"can0Bitrate"`
+	Can0State     string  `json:"can0State"`
+	Can0SamplePt  float64 `json:"can0SamplePt"`
+	Can0DBitrate  uint32  `json:"can0DBitrate"`
+	Can0DSamplePt float64 `json:"can0DSamplePt"`
+	Can0BusState  string  `json:"can0BusState"`
+	Can1RxFPS     uint64  `json:"can1RxFps"`
+	Can1TxFPS     uint64  `json:"can1TxFps"`
+	Can1Total     uint64  `json:"can1Total"`
+	Can1Bitrate   uint32  `json:"can1Bitrate"`
+	Can1State     string  `json:"can1State"`
+	Can1SamplePt  float64 `json:"can1SamplePt"`
+	Can1DBitrate  uint32  `json:"can1DBitrate"`
+	Can1DSamplePt float64 `json:"can1DSamplePt"`
+	Can1BusState  string  `json:"can1BusState"`
+	UDPSentPkts   uint64  `json:"udpSentPkts"`
+	UDPErrors     uint64  `json:"udpErrors"`
+	SentFrames    uint64  `json:"sentFrames"`
 }
 
 type CANStatsProvider struct {
@@ -62,6 +65,8 @@ type CANStatsProvider struct {
 	stats     CANStats
 	prevRecv0 uint64
 	prevRecv1 uint64
+	prevTx0   uint64
+	prevTx1   uint64
 }
 
 // Start runs a background ticker that updates FPS and bitrate once per second.
@@ -83,9 +88,29 @@ func (p *CANStatsProvider) tick() {
 	recv0 := atomic.LoadUint64(p.RecvFrames0)
 	recv1 := atomic.LoadUint64(p.RecvFrames1)
 
+	// Read kernel TX packet counters from sysfs.
+	readSysStat := func(iface, name string) uint64 {
+		data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/statistics/%s", iface, name))
+		if err != nil {
+			return 0
+		}
+		v, _ := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+		return v
+	}
+
+	var tx0, tx1 uint64
+	if len(p.Ifaces) > 0 {
+		tx0 = readSysStat(p.Ifaces[0], "tx_packets")
+	}
+	if len(p.Ifaces) > 1 {
+		tx1 = readSysStat(p.Ifaces[1], "tx_packets")
+	}
+
 	p.mu.Lock()
-	p.stats.Can0FPS = recv0 - p.prevRecv0
-	p.stats.Can1FPS = recv1 - p.prevRecv1
+	p.stats.Can0RxFPS = recv0 - p.prevRecv0
+	p.stats.Can1RxFPS = recv1 - p.prevRecv1
+	p.stats.Can0TxFPS = tx0 - p.prevTx0
+	p.stats.Can1TxFPS = tx1 - p.prevTx1
 	p.stats.Can0Total = recv0
 	p.stats.Can1Total = recv1
 	p.stats.UDPSentPkts = atomic.LoadUint64(p.SentPkts)
@@ -114,6 +139,8 @@ func (p *CANStatsProvider) tick() {
 
 	p.prevRecv0 = recv0
 	p.prevRecv1 = recv1
+	p.prevTx0 = tx0
+	p.prevTx1 = tx1
 	p.mu.Unlock()
 }
 
@@ -124,33 +151,36 @@ func (p *CANStatsProvider) Get() CANStats {
 }
 
 type Server struct {
-	httpServer   *http.Server
-	sysCollector *system.Collector
-	canStats     *CANStatsProvider
-	wifiMgr      *wifi.Manager
-	serialReader *serial.Reader
-	fileMgr      *filemanager.Manager
-	canIfaces    []string
+	httpServer     *http.Server
+	sysCollector   *system.Collector
+	canStats       *CANStatsProvider
+	wifiMgr        *wifi.Manager
+	serialReader   *serial.Reader
+	fileMgr        *filemanager.Manager
+	canIfaces      []string
+	timeSyncSender *timesync.Sender
 }
 
 type ServerConfig struct {
-	Port         int
-	SysCollector *system.Collector
-	CANStats     *CANStatsProvider
-	WifiMgr      *wifi.Manager
-	SerialReader *serial.Reader
-	FileMgr      *filemanager.Manager
-	CANIfaces    []string
+	Port           int
+	SysCollector   *system.Collector
+	CANStats       *CANStatsProvider
+	WifiMgr        *wifi.Manager
+	SerialReader   *serial.Reader
+	FileMgr        *filemanager.Manager
+	CANIfaces      []string
+	TimeSyncSender *timesync.Sender
 }
 
 func NewServer(cfg ServerConfig) *Server {
 	s := &Server{
-		sysCollector: cfg.SysCollector,
-		canStats:     cfg.CANStats,
-		wifiMgr:      cfg.WifiMgr,
-		serialReader: cfg.SerialReader,
-		fileMgr:      cfg.FileMgr,
-		canIfaces:    cfg.CANIfaces,
+		sysCollector:   cfg.SysCollector,
+		canStats:       cfg.CANStats,
+		wifiMgr:        cfg.WifiMgr,
+		serialReader:   cfg.SerialReader,
+		fileMgr:        cfg.FileMgr,
+		canIfaces:      cfg.CANIfaces,
+		timeSyncSender: cfg.TimeSyncSender,
 	}
 
 	mux := http.NewServeMux()
@@ -166,6 +196,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/system/overview", s.handleSystemOverview)
 	mux.HandleFunc("/api/system/processes", s.handleProcesses)
 	mux.HandleFunc("/api/system/time", s.handleTime)
+	mux.HandleFunc("/api/system/settime", s.handleSetTime)
 	mux.HandleFunc("/api/system/dmesg", s.handleDmesg)
 	mux.HandleFunc("/api/system/poweroff", s.handlePoweroff)
 
@@ -174,6 +205,7 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/can/diagnostics", s.handleCANDiagnostics)
 	mux.HandleFunc("/api/can/details", s.handleCANDetails)
 	mux.HandleFunc("/api/can/configure", s.handleCANConfigure)
+	mux.HandleFunc("/api/can/timesync", s.handleCANTimeSync)
 
 	// WiFi APIs
 	mux.HandleFunc("/api/wifi/status", s.handleWiFiStatus)
@@ -294,6 +326,42 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTime(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.sysCollector.Time.Stats())
+}
+
+// handleSetTime sets the system clock to the timestamp provided by the browser.
+// POST /api/system/settime  body: {"unixMs": 1718000000000}
+func (s *Server) handleSetTime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "Method not allowed")
+		return
+	}
+
+	var req struct {
+		UnixMs int64 `json:"unixMs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UnixMs == 0 {
+		writeError(w, 400, "Invalid request: unixMs required")
+		return
+	}
+
+	// Format as MMDDhhmm[[CC]YY][.ss] for the `date` command.
+	t := time.UnixMilli(req.UnixMs).UTC()
+	dateStr := t.Format("01021504") + strconv.Itoa(t.Year()) + "." + fmt.Sprintf("%02d", t.Second())
+
+	out, err := exec.Command("date", "-u", "-s", t.Format("2006-01-02 15:04:05")).CombinedOutput()
+	if err != nil {
+		_ = dateStr // fallback format not needed
+		writeError(w, 500, fmt.Sprintf("Failed to set time: %v (%s)", err, strings.TrimSpace(string(out))))
+		return
+	}
+
+	// Best-effort: sync hardware clock if hwclock is available.
+	exec.Command("hwclock", "-w").Run()
+
+	writeJSON(w, map[string]string{
+		"status": "ok",
+		"time":   t.Format("2006-01-02 15:04:05 UTC"),
+	})
 }
 
 func (s *Server) handleDmesg(w http.ResponseWriter, r *http.Request) {
@@ -746,14 +814,14 @@ type ChronySource struct {
 }
 
 type ChronySourceStat struct {
-	Name       string `json:"name"`
-	NP         int    `json:"np"`
-	NR         int    `json:"nr"`
-	Span       string `json:"span"`
-	Frequency  string `json:"frequency"`
-	FreqSkew   string `json:"freqSkew"`
-	Offset     string `json:"offset"`
-	StdDev     string `json:"stdDev"`
+	Name      string `json:"name"`
+	NP        int    `json:"np"`
+	NR        int    `json:"nr"`
+	Span      string `json:"span"`
+	Frequency string `json:"frequency"`
+	FreqSkew  string `json:"freqSkew"`
+	Offset    string `json:"offset"`
+	StdDev    string `json:"stdDev"`
 }
 
 type ChronyResult struct {
@@ -963,4 +1031,60 @@ func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeError(w, 405, "Method not allowed")
+}
+
+// handleCANTimeSync handles GET (status) and POST (configure) for CAN time sync.
+//
+// GET  /api/can/timesync  → { "enabled": bool, "iface": string }
+// POST /api/can/timesync  ← { "enabled": bool, "iface": string }
+//
+//	→ { "status": "ok", "enabled": bool, "iface": string }
+func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
+	if s.timeSyncSender == nil {
+		writeError(w, 503, "Time sync not available")
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		enabled, iface := s.timeSyncSender.Status()
+		writeJSON(w, map[string]interface{}{
+			"enabled": enabled,
+			"iface":   iface,
+		})
+
+	case "POST":
+		var req struct {
+			Enabled bool   `json:"enabled"`
+			Iface   string `json:"iface"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, 400, "Invalid request")
+			return
+		}
+
+		// Validate interface name
+		valid := false
+		for _, i := range s.canIfaces {
+			if i == req.Iface {
+				valid = true
+				break
+			}
+		}
+		if req.Enabled && !valid {
+			writeError(w, 400, "Invalid CAN interface")
+			return
+		}
+
+		s.timeSyncSender.Configure(req.Enabled, req.Iface)
+		enabled, iface := s.timeSyncSender.Status()
+		writeJSON(w, map[string]interface{}{
+			"status":  "ok",
+			"enabled": enabled,
+			"iface":   iface,
+		})
+
+	default:
+		writeError(w, 405, "Method not allowed")
+	}
 }

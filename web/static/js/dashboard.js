@@ -320,4 +320,26 @@
         }
     };
 
+    // Wire up the set-time button as soon as the DOM is ready.
+    document.addEventListener('DOMContentLoaded', function () {
+        var btn = document.getElementById('settime-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            var unixMs = Date.now();
+            btn.disabled = true;
+            btn.textContent = '同步中...';
+            window.api('/api/system/settime', {
+                method: 'POST',
+                body: JSON.stringify({ unixMs: unixMs })
+            }).then(function (res) {
+                window.showToast('时间已同步: ' + res.time, 'success');
+            }).catch(function () {
+                // api() already shows error toast
+            }).finally(function () {
+                btn.disabled = false;
+                btn.textContent = '同步到开发板';
+            });
+        });
+    });
+
 })();
