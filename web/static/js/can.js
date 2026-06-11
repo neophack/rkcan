@@ -271,11 +271,11 @@ const renderCANDetails = (info) => {
 /*  CAN Time Sync                                                              */
 /* ========================================================================== */
 
-const updateTimeSyncBadge = (enabled, iface) => {
+const updateTimeSyncBadge = (enabled, iface, protocol) => {
     const badge = document.getElementById('timesync-status-badge');
     if (!badge) return;
     badge.className = 'card-header-badge ' + (enabled ? 'timesync-badge-running' : 'timesync-badge-stopped');
-    badge.textContent = enabled ? `运行中 (${iface})` : '已停止';
+    badge.textContent = enabled ? `运行中 (${iface} · 0x${protocol || '5A4'})` : '已停止';
 };
 
 const loadTimeSyncStatus = async () => {
@@ -285,7 +285,10 @@ const loadTimeSyncStatus = async () => {
         const ifaceEl = document.getElementById('timesync-iface');
         if (toggle) toggle.checked = data.enabled;
         if (ifaceEl && data.iface) ifaceEl.value = data.iface;
-        updateTimeSyncBadge(data.enabled, data.iface);
+        const proto = data.protocol || '5A4';
+        const radioEl = document.querySelector(`input[name="timesync-protocol"][value="${proto}"]`);
+        if (radioEl) radioEl.checked = true;
+        updateTimeSyncBadge(data.enabled, data.iface, proto);
     } catch {
         // Non-critical, ignore
     }
@@ -294,15 +297,16 @@ const loadTimeSyncStatus = async () => {
 const applyTimeSyncConfig = async () => {
     const enabled = document.getElementById('timesync-enable-toggle')?.checked ?? false;
     const iface = document.getElementById('timesync-iface')?.value || 'can0';
+    const protocol = document.querySelector('input[name="timesync-protocol"]:checked')?.value || '5A4';
 
     try {
         const data = await window.api('/api/can/timesync', {
             method: 'POST',
-            body: JSON.stringify({ enabled, iface })
+            body: JSON.stringify({ enabled, iface, protocol })
         });
-        updateTimeSyncBadge(data.enabled, data.iface);
+        updateTimeSyncBadge(data.enabled, data.iface, data.protocol);
         const msg = data.enabled
-            ? `时间同步已在 ${data.iface} 上启动`
+            ? `时间同步已在 ${data.iface} 上启动 (0x${data.protocol || '5A4'})`
             : '时间同步已停止';
         window.showToast(msg, data.enabled ? 'success' : 'info');
     } catch {
@@ -385,6 +389,13 @@ const wireEvents = () => {
             }
         });
     }
+    document.querySelectorAll('input[name="timesync-protocol"]').forEach((radio) => {
+        radio.addEventListener('change', () => {
+            if (document.getElementById('timesync-enable-toggle')?.checked) {
+                applyTimeSyncConfig();
+            }
+        });
+    });
 };
 
 /* ========================================================================== */

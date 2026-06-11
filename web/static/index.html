@@ -294,7 +294,7 @@
 
         <div class="card">
           <div class="card-header">
-            时间同步发送 (CAN ID: 0x5A4)
+            时间同步发送
             <span class="card-header-badge" id="timesync-status-badge">已停止</span>
           </div>
           <div class="card-body">
@@ -305,6 +305,19 @@
                   <option value="can0">can0</option>
                   <option value="can1">can1</option>
                 </select>
+              </div>
+              <div class="form-group">
+                <label>报文格式</label>
+                <div style="display:flex;gap:16px;padding-top:6px;">
+                  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="radio" name="timesync-protocol" id="timesync-proto-5A4" value="5A4" checked style="width:15px;height:15px;accent-color:var(--blue);cursor:pointer;">
+                    <span>0x5A4 EEA2.1</small></span>
+                  </label>
+                  <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="radio" name="timesync-protocol" id="timesync-proto-594" value="594" style="width:15px;height:15px;accent-color:var(--blue);cursor:pointer;">
+                    <span>0x594 EEA3.0</small></span>
+                  </label>
+                </div>
               </div>
               <div class="form-group" style="display:flex;align-items:center;gap:10px;margin-bottom:1px;">
                 <label class="switch-label">
@@ -317,7 +330,7 @@
               </div>
             </div>
             <div style="margin-top:8px;font-size:12px;color:var(--text-muted);">
-              每 500 ms 向选定接口发送一对时间同步帧，将系统 UTC 时间同步给 CAN 总线上的其他设备。
+              每 500 ms 向选定接口发送一对时间同步帧。0x5A4 (EEA2.1): TimeDomain 高位 | Seq 低位；0x594 (EEA3.0): Seq 高位 | TimeDomain 低位。
             </div>
           </div>
         </div>

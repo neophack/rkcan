@@ -1035,10 +1035,10 @@ func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleCANTimeSync handles GET (status) and POST (configure) for CAN time sync.
 //
-// GET  /api/can/timesync  → { "enabled": bool, "iface": string }
-// POST /api/can/timesync  ← { "enabled": bool, "iface": string }
+// GET  /api/can/timesync  → { "enabled": bool, "iface": string, "protocol": string }
+// POST /api/can/timesync  ← { "enabled": bool, "iface": string, "protocol": string }
 //
-//	→ { "status": "ok", "enabled": bool, "iface": string }
+//	→ { "status": "ok", "enabled": bool, "iface": string, "protocol": string }
 func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 	if s.timeSyncSender == nil {
 		writeError(w, 503, "Time sync not available")
@@ -1047,16 +1047,18 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		enabled, iface := s.timeSyncSender.Status()
+		enabled, iface, protocol := s.timeSyncSender.Status()
 		writeJSON(w, map[string]interface{}{
-			"enabled": enabled,
-			"iface":   iface,
+			"enabled":  enabled,
+			"iface":    iface,
+			"protocol": string(protocol),
 		})
 
 	case "POST":
 		var req struct {
-			Enabled bool   `json:"enabled"`
-			Iface   string `json:"iface"`
+			Enabled  bool   `json:"enabled"`
+			Iface    string `json:"iface"`
+			Protocol string `json:"protocol"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, 400, "Invalid request")
@@ -1076,12 +1078,19 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.timeSyncSender.Configure(req.Enabled, req.Iface)
-		enabled, iface := s.timeSyncSender.Status()
+		// Validate protocol
+		proto := timesync.Protocol(req.Protocol)
+		if proto != timesync.Protocol5A4 && proto != timesync.Protocol594 {
+			proto = timesync.Protocol5A4
+		}
+
+		s.timeSyncSender.Configure(req.Enabled, req.Iface, proto)
+		enabled, iface, protocol := s.timeSyncSender.Status()
 		writeJSON(w, map[string]interface{}{
-			"status":  "ok",
-			"enabled": enabled,
-			"iface":   iface,
+			"status":   "ok",
+			"enabled":  enabled,
+			"iface":    iface,
+			"protocol": string(protocol),
 		})
 
 	default:
