@@ -8,7 +8,9 @@ import (
 )
 
 const (
-	// CAN-FD MTU size
+	// Classic CAN MTU size (struct can_frame)
+	CAN_MTU = 16
+	// CAN-FD MTU size (struct canfd_frame)
 	CANFD_MTU = 72
 
 	// CAN frame format flags
@@ -17,8 +19,9 @@ const (
 	CAN_ERR_FLAG = 0x20000000 // Error frame
 
 	// CAN-FD specific flags
-	CANFD_BRS = 0x01 // Bit Rate Switch
+	CANFD_BRS = 0x01 // Bit Rate Switch (data phase sent at dbitrate)
 	CANFD_ESI = 0x02 // Error State Indicator
+	CANFD_FDF = 0x04 // FD Frame (set by Linux >= 5.19 on received CAN-FD frames)
 
 	// CAN ID masks
 	CAN_SFF_MASK = 0x000007FF // Standard Frame Format mask
@@ -31,16 +34,18 @@ type Message struct {
 	Length uint8    // Actual data length (0-64 bytes for CAN-FD)
 	DLC    uint8    // Original DLC value from SocketCAN frame
 	Flags  uint8    // CAN-FD specific flags (BRS, ESI)
+	FD     bool     // true for a CAN-FD frame, false for a classic CAN 2.0 frame
 	Data   [64]byte // Data payload (max 64 bytes for CAN-FD)
 }
 
-// NewMessage creates a new CAN message
+// NewMessage creates a new CAN-FD message (without BRS)
 func NewMessage(id uint32, data []byte) *Message {
 	length := uint8(len(data))
 	msg := &Message{
 		ID:     id,
 		Length: length,
 		DLC:    canfdLenToDLC(length),
+		FD:     true,
 	}
 
 	if len(data) > 64 {
@@ -48,6 +53,24 @@ func NewMessage(id uint32, data []byte) *Message {
 	}
 
 	copy(msg.Data[:], data)
+	return msg
+}
+
+// NewFDMessage creates a new CAN-FD message, optionally with Bit Rate Switch
+// so the data phase is transmitted at the interface's data bitrate (dbitrate).
+func NewFDMessage(id uint32, data []byte, brs bool) *Message {
+	msg := NewMessage(id, data)
+	msg.SetBRS(brs)
+	return msg
+}
+
+// NewClassicMessage creates a new classic CAN 2.0 message (max 8 bytes)
+func NewClassicMessage(id uint32, data []byte) *Message {
+	if len(data) > 8 {
+		panic("classic CAN data length cannot exceed 8 bytes")
+	}
+	msg := NewMessage(id, data)
+	msg.FD = false
 	return msg
 }
 
@@ -117,6 +140,37 @@ func (m *Message) GetData() []byte {
 	return m.Data[:m.Length]
 }
 
+// Encode writes the Message into frame using the SocketCAN layout that matches
+// its type and returns the number of bytes to write to the socket:
+// CANFD_MTU (72) for CAN-FD frames, CAN_MTU (16) for classic CAN frames.
+func (m *Message) Encode(frame *[CANFD_MTU]byte) (int, error) {
+	if m.FD {
+		if err := m.Marshal(frame); err != nil {
+			return 0, err
+		}
+		return CANFD_MTU, nil
+	}
+
+	if m.Length > 8 {
+		return 0, fmt.Errorf("invalid classic CAN data length: %d", m.Length)
+	}
+	if m.Flags&(CANFD_BRS|CANFD_ESI) != 0 {
+		return 0, fmt.Errorf("BRS/ESI flags require a CAN-FD frame")
+	}
+
+	for i := range frame {
+		frame[i] = 0
+	}
+
+	// Linux SocketCAN classic frame structure (can_frame):
+	// Bytes 0-3: CAN ID, Byte 4: len (0..8), Bytes 5-7: pad/res/len8_dlc
+	// Bytes 8-15: Data
+	binary.LittleEndian.PutUint32(frame[0:4], m.ID)
+	frame[4] = m.Length
+	copy(frame[8:8+m.Length], m.Data[:m.Length])
+	return CAN_MTU, nil
+}
+
 // Marshal converts the Message to raw CAN-FD frame format
 func (m *Message) Marshal(frame *[CANFD_MTU]byte) error {
 	if m.Length > 64 {
@@ -138,7 +192,8 @@ func (m *Message) Marshal(frame *[CANFD_MTU]byte) error {
 	binary.LittleEndian.PutUint32(frame[0:4], m.ID)
 	// SocketCAN CAN-FD uses actual payload length (0..64), not DLC
 	frame[4] = m.Length
-	frame[5] = m.Flags
+	// Only BRS/ESI are meaningful on TX; the kernel sets FDF itself
+	frame[5] = m.Flags & (CANFD_BRS | CANFD_ESI)
 	// Bytes 6-7 are reserved and already zeroed
 
 	// Copy data starting at byte 8
@@ -205,11 +260,19 @@ func (m *Message) Unmarshal(frame []byte) error {
 
 	// Parse CAN-FD frame structure
 	m.ID = binary.LittleEndian.Uint32(frame[0:4])
-	// SocketCAN CAN-FD: byte 4 is actual length (0..64), not DLC
+	// SocketCAN: byte 4 is actual length (0..64), not DLC
 	length := frame[4]
 	m.Length = length
 	m.DLC = canfdLenToDLC(length)
-	m.Flags = frame[5]
+	// A read returns CANFD_MTU bytes for CAN-FD frames and CAN_MTU bytes for
+	// classic frames. Byte 5 is only the flags field (BRS/ESI/FDF) for CAN-FD;
+	// for classic frames it is padding and must not be read as flags.
+	m.FD = len(frame) == CANFD_MTU
+	if m.FD {
+		m.Flags = frame[5]
+	} else {
+		m.Flags = 0
+	}
 	// Bytes 6-7 are reserved
 
 	if m.Length > 64 {
@@ -242,6 +305,10 @@ func (m *Message) String() string {
 	if m.IsExtended() {
 		frameType = "EFF"
 	}
+	proto := "CAN"
+	if m.FD {
+		proto = "CAN-FD"
+	}
 
 	flags := ""
 	if m.HasBRS() {
@@ -257,6 +324,6 @@ func (m *Message) String() string {
 		flags += " ERR"
 	}
 
-	return fmt.Sprintf("CAN-FD[%s] ID:0x%X Len:%d%s Data:%X",
-		frameType, m.GetActualID(), m.Length, flags, m.GetData())
+	return fmt.Sprintf("%s[%s] ID:0x%X Len:%d%s Data:%X",
+		proto, frameType, m.GetActualID(), m.Length, flags, m.GetData())
 }

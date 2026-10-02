@@ -41,6 +41,16 @@ var (
 	noSend     = flag.Bool("nosend", true, "Disable built-in demo CAN sender")
 	webPort    = flag.Int("port", 80, "Web dashboard HTTP port")
 	fileRoot   = flag.String("fileroot", "/userdata", "File manager root directory")
+	txBRS      = flag.Bool("brs", false, "Send CAN-FD frames with Bit Rate Switch (data phase at dbitrate); default for demo sender and time sync")
+	udpFlags   = flag.Bool("udpflags", false, "Encode CAN-FD flags in the high nibble of the UDP DLC byte (bit4=FD, bit5=BRS, bit6=ESI)")
+)
+
+// UDP DLC byte flag bits (only used when -udpflags is set). The low nibble
+// always carries the CAN/CAN-FD DLC (0..15).
+const (
+	udpDLCFlagFD  = 0x10
+	udpDLCFlagBRS = 0x20
+	udpDLCFlagESI = 0x40
 )
 
 var globalSeq uint32
@@ -51,6 +61,9 @@ type canFrameInfo struct {
 	channel uint8
 	canID   uint32
 	dlc     uint8
+	fd      bool
+	brs     bool
+	esi     bool
 	dataLen int
 	data    [64]byte
 	ts      time.Time
@@ -63,6 +76,8 @@ type udpBatchSender struct {
 	writeErrs   uint64
 	recvFrames0 uint64
 	recvFrames1 uint64
+	recvBRS0    uint64
+	recvBRS1    uint64
 
 	conn   *net.UDPConn
 	dst    *net.UDPAddr
@@ -153,7 +168,19 @@ func (s *udpBatchSender) Send(f *canFrameInfo) {
 	binary.BigEndian.PutUint32(s.buf[s.pos:s.pos+4], f.canID)
 	s.pos += 4
 
-	s.buf[s.pos] = f.dlc
+	dlcByte := f.dlc & 0x0F
+	if *udpFlags {
+		if f.fd {
+			dlcByte |= udpDLCFlagFD
+		}
+		if f.brs {
+			dlcByte |= udpDLCFlagBRS
+		}
+		if f.esi {
+			dlcByte |= udpDLCFlagESI
+		}
+	}
+	s.buf[s.pos] = dlcByte
 	s.pos++
 
 	copy(s.buf[s.pos:s.pos+f.dataLen], f.data[:f.dataLen])
@@ -221,6 +248,9 @@ func runReceiverOnce(ctx context.Context, iface string, channel uint8, sender *u
 			info.channel = channel
 			info.canID = msg.ID
 			info.dlc = msg.DLC
+			info.fd = msg.FD
+			info.brs = msg.FD && msg.HasBRS()
+			info.esi = msg.FD && msg.HasESI()
 			info.dataLen = int(msg.Length)
 			if info.dataLen > 64 {
 				info.dataLen = 64
@@ -231,8 +261,14 @@ func runReceiverOnce(ctx context.Context, iface string, channel uint8, sender *u
 			switch channel {
 			case 0:
 				atomic.AddUint64(&sender.recvFrames0, 1)
+				if info.brs {
+					atomic.AddUint64(&sender.recvBRS0, 1)
+				}
 			case 1:
 				atomic.AddUint64(&sender.recvFrames1, 1)
+				if info.brs {
+					atomic.AddUint64(&sender.recvBRS1, 1)
+				}
 			}
 
 			sender.Send(&info)
@@ -281,6 +317,8 @@ func statsReporter(ctx context.Context, sender *udpBatchSender) {
 			errs := atomic.LoadUint64(&sender.writeErrs)
 			recv0 := atomic.LoadUint64(&sender.recvFrames0)
 			recv1 := atomic.LoadUint64(&sender.recvFrames1)
+			brs0 := atomic.LoadUint64(&sender.recvBRS0)
+			brs1 := atomic.LoadUint64(&sender.recvBRS1)
 
 			fps := frames - lastFrames
 			pps := pkts - lastPkts
@@ -290,20 +328,20 @@ func statsReporter(ctx context.Context, sender *udpBatchSender) {
 			lastPkts = pkts
 			lastErrs = errs
 
-			log.Printf("[STATS] %d fps | %d pps | total=%d pkts=%d errs=%d | can0=%d can1=%d",
-				fps, pps, frames, pkts, eps, recv0, recv1)
+			log.Printf("[STATS] %d fps | %d pps | total=%d pkts=%d errs=%d | can0=%d (brs=%d) can1=%d (brs=%d)",
+				fps, pps, frames, pkts, eps, recv0, brs0, recv1, brs1)
 		}
 	}
 }
 
-func canSender(ctx context.Context, bus *can.Bus) {
+func canSender(ctx context.Context, bus *can.Bus, brs bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("PANIC recovered in canSender: %v", r)
 		}
 	}()
 
-	log.Printf("CAN sender started")
+	log.Printf("CAN sender started (BRS=%v)", brs)
 	defer log.Printf("CAN sender stopped")
 
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -315,7 +353,7 @@ func canSender(ctx context.Context, bus *can.Bus) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			msg := can.NewMessage(0x123, []byte{0x01, 0x02, counter, 0x04})
+			msg := can.NewFDMessage(0x123, []byte{0x01, 0x02, counter, 0x04}, brs)
 			_ = bus.Send(msg)
 			counter++
 		}
@@ -333,6 +371,7 @@ func main() {
 	log.Printf(" CAN0   : %s", *can0Iface)
 	log.Printf(" CAN1   : %s", *can1Iface)
 	log.Printf(" Web    : http://0.0.0.0:%d", *webPort)
+	log.Printf(" TX BRS : %v  UDP flags: %v", *txBRS, *udpFlags)
 	log.Printf("========================================")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -359,11 +398,14 @@ func main() {
 
 	// CAN time sync sender
 	timeSyncSender := timesync.NewSender()
+	timeSyncSender.SetDefaultBRS(*txBRS)
 
 	// CAN stats provider for web dashboard
 	canStats := &web.CANStatsProvider{
 		RecvFrames0: &sender.recvFrames0,
 		RecvFrames1: &sender.recvFrames1,
+		RecvBRS0:    &sender.recvBRS0,
+		RecvBRS1:    &sender.recvBRS1,
 		SentFrames:  &sender.sentFrames,
 		SentPkts:    &sender.sentPkts,
 		WriteErrs:   &sender.writeErrs,
@@ -419,7 +461,7 @@ func main() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				canSender(ctx, bus)
+				canSender(ctx, bus, *txBRS)
 			}()
 		}
 	}

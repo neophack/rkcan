@@ -328,15 +328,16 @@ func (b *Bus) sendLoop(ctx context.Context) {
 			}
 
 			var frame [CANFD_MTU]byte
-			err := msg.Marshal(&frame)
+			n, err := msg.Encode(&frame)
 			if err != nil {
 				log.Printf("Couldn't marshal CAN frame: %v", err)
 				continue
 			}
 
-			// For CAN-FD frames, always write the full CANFD_MTU (72 bytes)
-			// Linux SocketCAN expects the complete frame structure
-			err = b.writeFrameWithRetry(frame[:])
+			// CAN-FD frames (incl. BRS) are written as the full CANFD_MTU
+			// (72 bytes), classic frames as CAN_MTU (16 bytes). Linux SocketCAN
+			// selects the frame type from the write size.
+			err = b.writeFrameWithRetry(frame[:n])
 			if err != nil {
 				b.noteSendFailure("write error after retries", err)
 				// Don't panic, just log and continue

@@ -39,6 +39,7 @@ type CANStats struct {
 	Can0DBitrate  uint32  `json:"can0DBitrate"`
 	Can0DSamplePt float64 `json:"can0DSamplePt"`
 	Can0BusState  string  `json:"can0BusState"`
+	Can0RxBRS     uint64  `json:"can0RxBrs"`
 	Can1RxFPS     uint64  `json:"can1RxFps"`
 	Can1TxFPS     uint64  `json:"can1TxFps"`
 	Can1Total     uint64  `json:"can1Total"`
@@ -48,6 +49,7 @@ type CANStats struct {
 	Can1DBitrate  uint32  `json:"can1DBitrate"`
 	Can1DSamplePt float64 `json:"can1DSamplePt"`
 	Can1BusState  string  `json:"can1BusState"`
+	Can1RxBRS     uint64  `json:"can1RxBrs"`
 	UDPSentPkts   uint64  `json:"udpSentPkts"`
 	UDPErrors     uint64  `json:"udpErrors"`
 	SentFrames    uint64  `json:"sentFrames"`
@@ -56,6 +58,8 @@ type CANStats struct {
 type CANStatsProvider struct {
 	RecvFrames0 *uint64
 	RecvFrames1 *uint64
+	RecvBRS0    *uint64 // received CAN-FD frames with BRS set (optional)
+	RecvBRS1    *uint64
 	SentFrames  *uint64
 	SentPkts    *uint64
 	WriteErrs   *uint64
@@ -113,6 +117,12 @@ func (p *CANStatsProvider) tick() {
 	p.stats.Can1TxFPS = tx1 - p.prevTx1
 	p.stats.Can0Total = recv0
 	p.stats.Can1Total = recv1
+	if p.RecvBRS0 != nil {
+		p.stats.Can0RxBRS = atomic.LoadUint64(p.RecvBRS0)
+	}
+	if p.RecvBRS1 != nil {
+		p.stats.Can1RxBRS = atomic.LoadUint64(p.RecvBRS1)
+	}
 	p.stats.UDPSentPkts = atomic.LoadUint64(p.SentPkts)
 	p.stats.UDPErrors = atomic.LoadUint64(p.WriteErrs)
 	p.stats.SentFrames = atomic.LoadUint64(p.SentFrames)
@@ -1035,8 +1045,8 @@ func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleCANTimeSync handles GET (status) and POST (configure) for CAN time sync.
 //
-// GET  /api/can/timesync  → { "enabled": bool, "iface": string, "protocol": string }
-// POST /api/can/timesync  ← { "enabled": bool, "iface": string, "protocol": string }
+// GET  /api/can/timesync  → { "enabled": bool, "iface": string, "protocol": string, "brs": bool }
+// POST /api/can/timesync  ← { "enabled": bool, "iface": string, "protocol": string, "brs": bool }
 //
 //	→ { "status": "ok", "enabled": bool, "iface": string, "protocol": string }
 func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
@@ -1047,11 +1057,12 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		enabled, iface, protocol := s.timeSyncSender.Status()
+		enabled, iface, protocol, brs := s.timeSyncSender.Status()
 		writeJSON(w, map[string]interface{}{
 			"enabled":  enabled,
 			"iface":    iface,
 			"protocol": string(protocol),
+			"brs":      brs,
 		})
 
 	case "POST":
@@ -1059,6 +1070,7 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 			Enabled  bool   `json:"enabled"`
 			Iface    string `json:"iface"`
 			Protocol string `json:"protocol"`
+			BRS      *bool  `json:"brs"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, 400, "Invalid request")
@@ -1084,13 +1096,19 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 			proto = timesync.Protocol5A4
 		}
 
-		s.timeSyncSender.Configure(req.Enabled, req.Iface, proto)
-		enabled, iface, protocol := s.timeSyncSender.Status()
+		_, _, _, brs := s.timeSyncSender.Status()
+		if req.BRS != nil {
+			brs = *req.BRS
+		}
+
+		s.timeSyncSender.Configure(req.Enabled, req.Iface, proto, brs)
+		enabled, iface, protocol, brs := s.timeSyncSender.Status()
 		writeJSON(w, map[string]interface{}{
 			"status":   "ok",
 			"enabled":  enabled,
 			"iface":    iface,
 			"protocol": string(protocol),
+			"brs":      brs,
 		})
 
 	default:

@@ -61,6 +61,7 @@ type Sender struct {
 	enabled  bool
 	iface    string
 	protocol Protocol
+	brs      bool // send frames with CAN-FD Bit Rate Switch
 	cancel   context.CancelFunc
 }
 
@@ -69,9 +70,16 @@ func NewSender() *Sender {
 	return &Sender{protocol: Protocol5A4}
 }
 
-// Configure atomically sets the enabled state, CAN interface, and protocol,
-// restarting the background goroutine as needed.
-func (s *Sender) Configure(enabled bool, iface string, protocol Protocol) {
+// SetDefaultBRS sets the BRS state used until the next Configure call.
+func (s *Sender) SetDefaultBRS(brs bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.brs = brs
+}
+
+// Configure atomically sets the enabled state, CAN interface, protocol and
+// CAN-FD Bit Rate Switch, restarting the background goroutine as needed.
+func (s *Sender) Configure(enabled bool, iface string, protocol Protocol, brs bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -88,28 +96,31 @@ func (s *Sender) Configure(enabled bool, iface string, protocol Protocol) {
 	s.enabled = enabled
 	s.iface = iface
 	s.protocol = protocol
+	s.brs = brs
 
 	if enabled && iface != "" {
 		ctx, cancel := context.WithCancel(context.Background())
 		s.cancel = cancel
-		go s.run(ctx, iface, protocol)
+		go s.run(ctx, iface, protocol, brs)
 	}
 }
 
-// Status returns the current enabled flag, selected CAN interface, and protocol.
-func (s *Sender) Status() (enabled bool, iface string, protocol Protocol) {
+// Status returns the current enabled flag, selected CAN interface, protocol
+// and BRS setting.
+func (s *Sender) Status() (enabled bool, iface string, protocol Protocol, brs bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.enabled, s.iface, s.protocol
+	return s.enabled, s.iface, s.protocol, s.brs
 }
 
 // canFDSocket is a minimal blocking CAN-FD raw socket used exclusively for TX.
 type canFDSocket struct {
-	fd int
+	fd  int
+	brs bool // set CANFD_BRS on every transmitted frame
 }
 
 // openCANFDSocket opens a blocking CAN-FD raw socket bound to ifaceName.
-func openCANFDSocket(ifaceName string) (*canFDSocket, error) {
+func openCANFDSocket(ifaceName string, brs bool) (*canFDSocket, error) {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return nil, fmt.Errorf("interface %s: %w", ifaceName, err)
@@ -145,7 +156,7 @@ func openCANFDSocket(ifaceName string) (*canFDSocket, error) {
 		log.Printf("timesync: warning: failed to disable RX filter: %v", err)
 	}
 
-	return &canFDSocket{fd: fd}, nil
+	return &canFDSocket{fd: fd, brs: brs}, nil
 }
 
 func (cs *canFDSocket) Close() {
@@ -161,12 +172,15 @@ func (cs *canFDSocket) Close() {
 //	bytes 8-71: payload
 const canfdMTU = 72
 
-// buildCANFDFrame encodes data into a 72-byte canfd_frame.
-func buildCANFDFrame(canID uint32, data []byte) [canfdMTU]byte {
+// buildCANFDFrame encodes data into a 72-byte canfd_frame. With brs set the
+// data phase is transmitted at the interface's data bitrate (dbitrate).
+func buildCANFDFrame(canID uint32, data []byte, brs bool) [canfdMTU]byte {
 	var frame [canfdMTU]byte
 	binary.LittleEndian.PutUint32(frame[0:4], canID)
 	frame[4] = uint8(len(data)) // actual length
-	frame[5] = 0                // no BRS, no ESI
+	if brs {
+		frame[5] = can.CANFD_BRS
+	}
 	copy(frame[8:], data)
 	return frame
 }
@@ -176,7 +190,7 @@ func buildCANFDFrame(canID uint32, data []byte) [canfdMTU]byte {
 // ACK from any node); the frame is silently dropped so we never block or spam
 // the log.
 func (cs *canFDSocket) writeFrame(canID uint32, data []byte) error {
-	frame := buildCANFDFrame(canID, data)
+	frame := buildCANFDFrame(canID, data, cs.brs)
 	_, err := unix.Write(cs.fd, frame[:])
 	if err == unix.ENOBUFS {
 		return nil // TX queue full – drop this frame silently
@@ -185,8 +199,8 @@ func (cs *canFDSocket) writeFrame(canID uint32, data []byte) error {
 }
 
 // run is the background goroutine that sends time sync pairs on the given iface.
-func (s *Sender) run(ctx context.Context, iface string, protocol Protocol) {
-	sock, err := openCANFDSocket(iface)
+func (s *Sender) run(ctx context.Context, iface string, protocol Protocol, brs bool) {
+	sock, err := openCANFDSocket(iface, brs)
 	if err != nil {
 		log.Printf("timesync: failed to open socket on %s: %v", iface, err)
 		s.mu.Lock()
@@ -198,8 +212,8 @@ func (s *Sender) run(ctx context.Context, iface string, protocol Protocol) {
 	defer sock.Close()
 
 	canID := canIDForProtocol(protocol)
-	log.Printf("timesync: sender started on %s (protocol %s, CAN ID 0x%03X, interval %s)",
-		iface, protocol, canID, SyncInterval)
+	log.Printf("timesync: sender started on %s (protocol %s, CAN ID 0x%03X, BRS %v, interval %s)",
+		iface, protocol, canID, brs, SyncInterval)
 	defer log.Printf("timesync: sender stopped on %s", iface)
 
 	// Close the socket when context is cancelled so the blocking write unblocks.
