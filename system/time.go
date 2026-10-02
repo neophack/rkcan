@@ -3,6 +3,7 @@
 package system
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,13 +27,47 @@ type TimeStats struct {
 	ChronyStratum    int     `json:"chronyStratum"`
 }
 
+// ChronycPath and ChronyConfPath locate chrony. An empty ChronycPath is
+// resolved automatically by Chronyc(). Set them before starting collectors.
+var (
+	ChronycPath    = ""
+	ChronyConfPath = "/etc/chrony.conf"
+)
+
+// Chronyc returns the chronyc binary to run: ChronycPath if set, otherwise
+// /userdata/chronyc (the bundled build), otherwise chronyc from $PATH.
+func Chronyc() string {
+	if ChronycPath != "" {
+		return ChronycPath
+	}
+	if _, err := os.Stat("/userdata/chronyc"); err == nil {
+		return "/userdata/chronyc"
+	}
+	if p, err := exec.LookPath("chronyc"); err == nil {
+		return p
+	}
+	return "chronyc"
+}
+
+// RunChronyc runs chronyc with a timeout so a hung chronyd cannot block callers.
+func RunChronyc(args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, Chronyc(), args...).CombinedOutput()
+	return string(out), err
+}
+
+// chronyPollInterval is how often chronyc is queried for the dashboard.
+const chronyPollInterval = 5 * time.Second
+
 type TimeCollector struct {
-	mu       sync.RWMutex
-	stats    TimeStats
-	phcFd    int
-	phcAvail bool
-	prevSys  time.Time
-	prevPHC  time.Time
+	mu        sync.RWMutex
+	stats     TimeStats
+	phcFd     int
+	phcAvail  bool
+	prevSys   time.Time
+	prevPHC   time.Time
+	lastChron time.Time
 }
 
 func NewTimeCollector() *TimeCollector {
@@ -51,8 +86,12 @@ func NewTimeCollector() *TimeCollector {
 }
 
 func (c *TimeCollector) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.phcFd >= 0 {
 		unix.Close(c.phcFd)
+		c.phcFd = -1
+		c.phcAvail = false
 	}
 }
 
@@ -65,11 +104,11 @@ type ptpClockTime struct {
 }
 
 func getChronyTracking() (leapStatus string, stratum int) {
-	out, err := exec.Command("/userdata/chronyc", "tracking").CombinedOutput()
+	out, err := RunChronyc("tracking")
 	if err != nil {
 		return "N/A", 0
 	}
-	lines := strings.Split(string(out), "\n")
+	lines := strings.Split(out, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if idx := strings.Index(line, ":"); idx > 0 {
@@ -87,6 +126,15 @@ func getChronyTracking() (leapStatus string, stratum int) {
 }
 
 func (c *TimeCollector) Collect() {
+	// Query chrony outside the lock (it spawns a process)
+	var chronyUpdated bool
+	var leapStatus string
+	var stratum int
+	if time.Since(c.lastChron) >= chronyPollInterval {
+		leapStatus, stratum = getChronyTracking()
+		chronyUpdated = true
+	}
+
 	now := time.Now()
 
 	c.mu.Lock()
@@ -96,10 +144,11 @@ func (c *TimeCollector) Collect() {
 	c.stats.SystemUnixMs = now.UnixMilli()
 	c.stats.PHCAvailable = c.phcAvail
 
-	// Update chrony status
-	leapStatus, stratum := getChronyTracking()
-	c.stats.ChronyLeapStatus = leapStatus
-	c.stats.ChronyStratum = stratum
+	if chronyUpdated {
+		c.lastChron = now
+		c.stats.ChronyLeapStatus = leapStatus
+		c.stats.ChronyStratum = stratum
+	}
 
 	if c.phcAvail && c.phcFd >= 0 {
 		var pct ptpClockTime

@@ -1,0 +1,19 @@
+[Unit]
+Description=RKCAN dual CAN-FD to UDP bridge and web dashboard
+Documentation=https://github.com/neophack/rkcan
+After=network.target rkcan-can.service
+Wants=network.target
+Requires=rkcan-can.service
+
+[Service]
+Type=simple
+EnvironmentFile=-@CONFDIR@/rkcan.conf
+ExecStart=@BINDIR@/rkcan
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

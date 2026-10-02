@@ -58,7 +58,10 @@ func (c *ProcessCollector) Collect() {
 		return
 	}
 	curCPU := ticks[0]
-	cpuDelta := curCPU.total() - c.prevCPU.total()
+	var cpuDelta uint64
+	if curCPU.total() > c.prevCPU.total() {
+		cpuDelta = curCPU.total() - c.prevCPU.total()
+	}
 
 	memInfo := readMemInfo()
 	totalMem := memInfo["MemTotal"]
@@ -92,8 +95,10 @@ func (c *ProcessCollector) Collect() {
 
 		var cpuPct float64
 		if prev, ok := c.prevSnap[pid]; ok && cpuDelta > 0 {
-			procDelta := (snap.utime + snap.stime) - (prev.utime + prev.stime)
-			cpuPct = float64(procDelta) / float64(cpuDelta) * 100
+			cur, before := snap.utime+snap.stime, prev.utime+prev.stime
+			if cur >= before { // PID may have been reused
+				cpuPct = float64(cur-before) / float64(cpuDelta) * 100
+			}
 		}
 
 		statusData, _ := os.ReadFile(filepath.Join(dir, "status"))

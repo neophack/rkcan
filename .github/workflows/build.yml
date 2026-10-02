@@ -12,48 +12,30 @@ permissions:
 
 jobs:
   go:
-    name: Go (vet, test, cross-build)
+    name: Go (test, packages)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Vet
-        run: go vet ./...
+      - name: Format, vet and test
+        run: make test
 
-      - name: Test
-        run: go test ./...
-
-      - name: Build linux/arm64
-        env:
-          GOOS: linux
-          GOARCH: arm64
-          CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o dist/rkcan-linux-arm64 .
-
-      - name: Build linux/arm (ARMv7)
-        env:
-          GOOS: linux
-          GOARCH: arm
-          GOARM: "7"
-          CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o dist/rkcan-linux-arm32 .
-
-      - name: Build linux/amd64
-        env:
-          GOOS: linux
-          GOARCH: amd64
-          CGO_ENABLED: "0"
-        run: go build -trimpath -ldflags="-s -w" -o dist/rkcan-linux-amd64 .
+      - name: Build packages
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME}"; else VERSION="$(git describe --tags --always 2>/dev/null || echo dev)-${GITHUB_SHA::7}"; fi
+          make package VERSION="$VERSION"
 
       - uses: actions/upload-artifact@v4
         with:
           name: rkcan
-          path: dist/*
+          path: dist/*.tar.gz
           if-no-files-found: error
 
   receiver:
@@ -99,7 +81,7 @@ jobs:
       - name: Package receiver binaries
         run: |
           mkdir -p release
-          cp artifacts/rkcan/* release/
+          cp artifacts/rkcan/*.tar.gz release/
           cd artifacts
           for d in udp-canfd-receiver-*; do
             (cd "$d" && zip -q "../../release/$d.zip" *)

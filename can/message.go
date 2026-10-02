@@ -284,17 +284,13 @@ func (m *Message) Unmarshal(frame []byte) error {
 		m.Data[i] = 0
 	}
 
-	// Copy data if available
-	if len(frame) >= 8+int(m.Length) {
-		copy(m.Data[:m.Length], frame[8:8+m.Length])
-	} else {
-		// If frame is shorter than expected, copy what we have
-		availableData := len(frame) - 8
-		if availableData > 0 {
-			copy(m.Data[:availableData], frame[8:])
-			fmt.Printf("DEBUG: Frame shorter than expected, copied %d bytes instead of %d\n", availableData, m.Length)
-		}
+	if !m.FD && m.Length > 8 {
+		return fmt.Errorf("invalid classic CAN data length: %d", m.Length)
 	}
+	if len(frame) < 8+int(m.Length) {
+		return fmt.Errorf("frame truncated: %d bytes for data length %d", len(frame), m.Length)
+	}
+	copy(m.Data[:m.Length], frame[8:8+m.Length])
 
 	return nil
 }

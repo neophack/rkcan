@@ -1,0 +1,108 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          rkcan
+# Required-Start:    $network $local_fs
+# Required-Stop:     $network $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: RKCAN CAN-FD to UDP bridge and web dashboard
+### END INIT INFO
+#
+# SysV / BusyBox init script. Runs rkcan under a small supervisor that
+# restarts it if it exits unexpectedly.
+
+NAME=rkcan
+DAEMON=@BINDIR@/rkcan
+SETUP=@BINDIR@/rkcan-can-setup
+CONF=@CONFDIR@/rkcan.conf
+PIDFILE=/var/run/rkcan.pid
+CHILDPID=/var/run/rkcan.child.pid
+
+load_conf() {
+    if [ -f "$CONF" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$CONF"
+        set +a
+    fi
+    # Without journald, log to a rotated file by default
+    if [ -z "$RKCAN_LOGFILE" ]; then
+        RKCAN_LOGFILE=/var/log/rkcan.log
+        export RKCAN_LOGFILE
+    fi
+}
+
+is_running() {
+    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+supervise() {
+    load_conf
+    stopping=0
+    child=""
+    trap 'stopping=1; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null' TERM INT
+    while [ $stopping -eq 0 ]; do
+        "$DAEMON" >>"${RKCAN_LOGFILE}.stderr" 2>&1 &
+        child=$!
+        echo "$child" >"$CHILDPID"
+        wait "$child"
+        rc=$?
+        # wait returns early when a signal arrives; let the child finish
+        while kill -0 "$child" 2>/dev/null; do
+            wait "$child"
+        done
+        [ $stopping -eq 1 ] && break
+        echo "$(date '+%Y/%m/%d %H:%M:%S') rkcan exited with status $rc, restarting in 2s" >>"$RKCAN_LOGFILE"
+        sleep 2
+    done
+    rm -f "$CHILDPID"
+}
+
+start() {
+    if is_running; then
+        echo "$NAME is already running"
+        return 0
+    fi
+    printf "Starting %s: " "$NAME"
+    "$SETUP" "$CONF" >/dev/null 2>&1
+    # Detach the supervisor from the calling shell
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$0" supervise </dev/null >/dev/null 2>&1 &
+    else
+        nohup "$0" supervise </dev/null >/dev/null 2>&1 &
+    fi
+    echo $! >"$PIDFILE"
+    sleep 1
+    if is_running; then echo "OK"; else echo "FAILED"; return 1; fi
+}
+
+stop() {
+    printf "Stopping %s: " "$NAME"
+    if ! is_running; then
+        rm -f "$PIDFILE" "$CHILDPID"
+        echo "not running"
+        return 0
+    fi
+    kill -TERM "$(cat "$PIDFILE")" 2>/dev/null
+    i=0
+    while is_running && [ $i -lt 15 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if is_running; then
+        [ -f "$CHILDPID" ] && kill -KILL "$(cat "$CHILDPID")" 2>/dev/null
+        kill -KILL "$(cat "$PIDFILE")" 2>/dev/null
+    fi
+    rm -f "$PIDFILE" "$CHILDPID"
+    echo "OK"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload) stop; start ;;
+    status)
+        if is_running; then echo "$NAME is running (pid $(cat "$PIDFILE"))"; else echo "$NAME is stopped"; exit 3; fi ;;
+    supervise) supervise ;;
+    *) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

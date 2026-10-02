@@ -151,26 +151,26 @@ const loadDiagnostics = async () => {
     }
 };
 
-const formatDiagnostics = (results, iface) => {
-    if (!results || !Array.isArray(results)) {
+const formatDiagnostics = (results) => {
+    if (!Array.isArray(results)) {
         return typeof results === 'object' ? JSON.stringify(results, null, 2) : String(results);
     }
 
-    const lines = [`=== Diagnostics: ${iface} ===`, ''];
-
-    for (const item of results) {
-        const icon = item.status === 'PASS' ? '[OK]' :
-                     item.status === 'WARN' ? '[!!]' : '[XX]';
-        lines.push(`${icon} ${item.name || item.check || 'check'}`);
-        if (item.detail) lines.push(`    ${item.detail}`);
+    const lines = [];
+    for (const res of results) {
+        lines.push(`=== Diagnostics: ${res.interface} (${res.timestamp || ''}) ===`, '');
+        for (const item of res.checks || []) {
+            const icon = item.status === 'PASS' ? '[OK]' : item.status === 'WARN' ? '[!!]' : '[XX]';
+            lines.push(`${icon} ${item.name}`);
+            if (item.detail) lines.push(`    ${item.detail}`);
+        }
+        const st = res.statistics;
+        if (st) {
+            lines.push('', `State: ${st.state || '-'}  RX: ${st.rxFrames}  TX: ${st.txFrames}  ` +
+                `RX err: ${st.rxErrors}  TX err: ${st.txErrors}  Bus err: ${st.busErrors}  Restarts: ${st.restarts}`);
+        }
+        lines.push('', `Overall: ${res.overall}`, '');
     }
-
-    // Overall status
-    const hasError = results.some(r => r.status === 'FAIL' || r.status === 'ERROR');
-    const hasWarn = results.some(r => r.status === 'WARN');
-    const overall = hasError ? 'ERROR' : hasWarn ? 'WARNING' : 'OK';
-    lines.push('', `Overall: ${overall}`);
-
     return lines.join('\n');
 };
 

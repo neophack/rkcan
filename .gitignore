@@ -1,7 +1,9 @@
+# Build outputs
+build/
+dist/
+rkcan-linux-*
 UdpCanFdReceiver/build
-rkcan-linux-arm32
+chrony_build/out/
 
 # Accidental generated files
 UDP
-chrony_build/out/rkcan-linux-*
-dist/

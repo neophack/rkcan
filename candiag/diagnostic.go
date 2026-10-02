@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/penghongxia/rkcan/can"
 )
 
 type DiagResult struct {
@@ -163,7 +165,7 @@ func checkBitrate(r *DiagResult, iface string) {
 		r.Checks = append(r.Checks, CheckItem{
 			Name:   "Bitrate Configuration",
 			Status: "FAIL",
-			Detail: "Bitrate is 0. Configure with: ip link set can0 type can bitrate 500000",
+			Detail: fmt.Sprintf("Bitrate is 0. Configure with: ip link set %s type can bitrate 500000", iface),
 		})
 		return
 	}
@@ -190,7 +192,7 @@ func checkCANFDSupport(r *DiagResult, iface string) {
 		r.Checks = append(r.Checks, CheckItem{
 			Name:   "CAN-FD Support",
 			Status: "WARN",
-			Detail: "MTU=16, Classic CAN mode. Enable FD with: ip link set can0 type can fd on",
+			Detail: fmt.Sprintf("MTU=16, Classic CAN mode. Enable FD with: ip link set %s type can bitrate 500000 dbitrate 2000000 fd on", iface),
 		})
 	} else {
 		r.Checks = append(r.Checks, CheckItem{
@@ -202,11 +204,10 @@ func checkCANFDSupport(r *DiagResult, iface string) {
 }
 
 func checkBusState(r *DiagResult, iface string) {
-	data, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/can_state", iface))
-	if err != nil {
+	state, err := can.BusState(iface)
+	if err != nil || state == can.StateUnknown {
 		return
 	}
-	state := strings.TrimSpace(string(data))
 	status := "PASS"
 	detail := fmt.Sprintf("Bus state: %s", state)
 
@@ -301,10 +302,44 @@ func readStatistics(r *DiagResult, iface string) {
 	stat.TxErrors = readStat("tx_errors")
 	stat.RxErrors = readStat("rx_errors")
 
-	stateData, _ := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/can_state", iface))
-	stat.State = strings.TrimSpace(string(stateData))
+	stat.State, _ = can.BusState(iface)
+	stat.BusErrors, stat.Restarts = readCANXstats(iface)
 
 	r.Statistics = stat
+}
+
+// readCANXstats parses the CAN extended statistics from
+// "ip -s -d link show", e.g.
+//
+//	re-started bus-errors arbit-lost error-warn error-pass bus-off
+//	0          12         0          1          0          0
+func readCANXstats(iface string) (busErrors, restarts uint64) {
+	out, err := exec.Command("ip", "-s", "-d", "link", "show", iface).Output()
+	if err != nil {
+		return 0, 0
+	}
+	lines := strings.Split(string(out), "\n")
+	for i, line := range lines {
+		hdr := strings.Fields(line)
+		if len(hdr) == 0 || hdr[0] != "re-started" || i+1 >= len(lines) {
+			continue
+		}
+		vals := strings.Fields(lines[i+1])
+		for j, name := range hdr {
+			if j >= len(vals) {
+				break
+			}
+			v, _ := strconv.ParseUint(vals[j], 10, 64)
+			switch name {
+			case "re-started":
+				restarts = v
+			case "bus-errors":
+				busErrors = v
+			}
+		}
+		break
+	}
+	return busErrors, restarts
 }
 
 func DiagnosticJSON(ifaces []string) ([]byte, error) {
@@ -328,15 +363,13 @@ type BitratePreset struct {
 	TimeQuanta uint32  `json:"timeQuanta"`
 }
 
-
-
 // CANInterfaceInfo holds detailed information about a CAN interface
 // (equivalent to "ip -details link show <iface>")
 type CANInterfaceInfo struct {
 	Interface    string  `json:"interface"`
-	State        string  `json:"state"`        // UP / DOWN
+	State        string  `json:"state"` // UP / DOWN
 	MTU          int     `json:"mtu"`
-	BusState     string  `json:"busState"`     // ERROR-ACTIVE, ERROR-WARNING, etc.
+	BusState     string  `json:"busState"` // ERROR-ACTIVE, ERROR-WARNING, etc.
 	Controller   string  `json:"controller"`
 	Bitrate      uint32  `json:"bitrate"`
 	SamplePoint  float64 `json:"samplePoint"`
@@ -394,10 +427,9 @@ func GetCANInterfaceInfo(iface string) (*CANInterfaceInfo, error) {
 		info.MTU, _ = strconv.Atoi(strings.TrimSpace(string(mtuData)))
 	}
 
-	// --- Bus state ---
-	stateData, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/can_state", iface))
-	if err == nil {
-		info.BusState = strings.TrimSpace(string(stateData))
+	// --- Bus state (also refined below from "ip -details") ---
+	if state, err := can.BusState(iface); err == nil && state != can.StateUnknown {
+		info.BusState = state
 	}
 
 	// --- Bit timing helpers ---
@@ -472,7 +504,7 @@ func GetCANInterfaceInfo(iface string) (*CANInterfaceInfo, error) {
 
 			// Bus state, berr-counter, restart-ms
 			// e.g. "can <FD> state ERROR-ACTIVE (berr-counter tx 0 rx 0) restart-ms 0"
-			if strings.Contains(line, " state ") {
+			if strings.HasPrefix(line, "can ") && strings.Contains(line, " state ") {
 				parts := strings.Fields(line)
 				for i := 0; i < len(parts)-1; i++ {
 					if parts[i] == "state" {

@@ -77,9 +77,15 @@ func (c *NetCollector) Collect() {
 		st.RxBytes = vals[0]
 		st.TxBytes = vals[1]
 
+		st.RxBytesPerSec, st.TxBytesPerSec = 0, 0
 		if ok {
-			st.RxBytesPerSec = vals[0] - prev[0]
-			st.TxBytesPerSec = vals[1] - prev[1]
+			// Counters restart from zero when a driver is reloaded
+			if vals[0] >= prev[0] {
+				st.RxBytesPerSec = vals[0] - prev[0]
+			}
+			if vals[1] >= prev[1] {
+				st.TxBytesPerSec = vals[1] - prev[1]
+			}
 		}
 
 		st.RxHistory = append(st.RxHistory, st.RxBytesPerSec)
@@ -97,6 +103,13 @@ func (c *NetCollector) Collect() {
 		}
 
 		c.prev[name] = vals
+	}
+
+	for name := range c.stat.Interfaces {
+		if _, ok := ifaces[name]; !ok {
+			delete(c.stat.Interfaces, name)
+			delete(c.prev, name)
+		}
 	}
 
 	c.stat.TotalRx = totalRx

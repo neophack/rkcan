@@ -57,3 +57,17 @@ func TestEncodeClassic(t *testing.T) {
 		t.Fatal("expected error for BRS on classic frame")
 	}
 }
+
+func TestParseIPLinkCANState(t *testing.T) {
+	out := `3: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 72 qdisc pfifo_fast state UP mode DEFAULT group default qlen 10
+    link/can  promiscuity 0 minmtu 0 maxmtu 0
+    can <FD> state ERROR-PASSIVE (berr-counter tx 128 rx 0) restart-ms 100
+	  bitrate 500000 sample-point 0.800
+`
+	if got := parseIPLinkCANState(out); got != StateErrorPassive {
+		t.Fatalf("got %q", got)
+	}
+	if got := parseIPLinkCANState("4: vcan0: <NOARP,UP,LOWER_UP> mtu 72\n    link/can\n    vcan\n"); got != StateUnknown {
+		t.Fatalf("got %q", got)
+	}
+}

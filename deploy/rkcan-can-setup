@@ -1,0 +1,75 @@
+#!/bin/sh
+# Configure the CAN interfaces listed in the rkcan configuration.
+# Usage: rkcan-can-setup [config-file]
+CONF=${1:-${RKCAN_CONF:-@CONFDIR@/rkcan.conf}}
+# shellcheck disable=SC1090
+[ -f "$CONF" ] && . "$CONF"
+
+[ "${CAN_SETUP:-yes}" = "yes" ] || exit 0
+
+log() { echo "rkcan-can-setup: $*"; }
+
+if ! ip -V 2>&1 | grep -qi iproute2; then
+    if ! ip link help 2>&1 | grep -q "type"; then
+        log "WARNING: 'ip' does not look like iproute2; CAN configuration may fail (install iproute2)"
+    fi
+fi
+
+# get IDX NAME: per-interface override CAN<IDX>_NAME, else CAN_NAME
+get() {
+    eval "v=\${CAN$1_$2-}"
+    [ -n "$v" ] || eval "v=\${CAN_$2-}"
+    printf '%s' "$v"
+}
+
+setup_iface() {
+    idx=$1
+    iface=$2
+
+    # Wait for the driver to register the interface (early boot)
+    i=0
+    while [ ! -e "/sys/class/net/$iface" ] && [ $i -lt "${CAN_WAIT_SEC:-10}" ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ ! -e "/sys/class/net/$iface" ]; then
+        log "$iface not found, skipping"
+        return 0
+    fi
+
+    bitrate=$(get "$idx" BITRATE)
+    sp=$(get "$idx" SAMPLE_POINT)
+    fd=$(get "$idx" FD)
+    dbitrate=$(get "$idx" DBITRATE)
+    dsp=$(get "$idx" DSAMPLE_POINT)
+    restart=$(get "$idx" RESTART_MS)
+    txq=$(get "$idx" TXQUEUELEN)
+
+    set -- type can bitrate "${bitrate:-500000}"
+    [ -n "$sp" ] && set -- "$@" sample-point "$sp"
+    if [ "$fd" = "on" ]; then
+        set -- "$@" dbitrate "${dbitrate:-2000000}"
+        [ -n "$dsp" ] && set -- "$@" dsample-point "$dsp"
+        set -- "$@" fd on
+    elif [ "$(cat "/sys/class/net/$iface/mtu" 2>/dev/null)" = "72" ]; then
+        # Only switch FD off when it is on: controllers without CAN-FD
+        # support reject any change to the FD mode
+        set -- "$@" fd off
+    fi
+    [ -n "$restart" ] && set -- "$@" restart-ms "$restart"
+
+    ip link set "$iface" down 2>/dev/null
+    if ip link set "$iface" "$@"; then
+        log "$iface: $*"
+    else
+        log "ERROR: failed to configure $iface ($*)"
+    fi
+    [ -n "$txq" ] && ip link set "$iface" txqueuelen "$txq" 2>/dev/null
+    if ! ip link set "$iface" up; then
+        log "ERROR: failed to bring $iface up"
+    fi
+}
+
+[ -n "${RKCAN_CAN0-can0}" ] && setup_iface 0 "${RKCAN_CAN0-can0}"
+[ -n "${RKCAN_CAN1-can1}" ] && setup_iface 1 "${RKCAN_CAN1-can1}"
+exit 0

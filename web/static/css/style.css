@@ -1154,3 +1154,26 @@ select {
     .wifi-layout { grid-template-columns: 1fr; }
     .wifi-status-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ===== Shared helpers ===== */
+.mono { font-family: var(--mono); }
+.text-muted { color: var(--text-muted); }
+.center { text-align: center; }
+
+/* ===== CAN transmit / monitor ===== */
+.cantx-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin-bottom: 4px; }
+.cantx-flags { display: flex; gap: 10px; padding-bottom: 4px; }
+.cantx-sep { width: 1px; height: 24px; background: var(--border); margin: 0 4px 10px; }
+#canmon-table td { white-space: nowrap; }
+#canmon-table tr.stale td { color: var(--text-muted); }
+.data-changed { color: var(--yellow); }
+.card-header-actions .form-select-sm { width: auto; }
+
+/* ===== Replay / record ===== */
+.replay-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-bottom: 6px; }
+.replay-row .form-select { min-width: 110px; }
+.replay-info { font-size: 13px; margin: 2px 0 10px; }
+.replay-stats { font-size: 13px; color: var(--text-dim); margin-top: 8px; word-break: break-all; }
+.record-ifaces { display: flex; gap: 10px; padding-top: 4px; }
+.progress { height: 6px; background: var(--bg-input); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+.progress-bar { height: 100%; width: 0; background: var(--blue); transition: width 0.4s linear; }

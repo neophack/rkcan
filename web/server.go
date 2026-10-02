@@ -4,14 +4,19 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
+	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +24,9 @@ import (
 	"time"
 
 	"github.com/penghongxia/rkcan/candiag"
+	"github.com/penghongxia/rkcan/cantool"
 	"github.com/penghongxia/rkcan/filemanager"
+	"github.com/penghongxia/rkcan/replay"
 	"github.com/penghongxia/rkcan/serial"
 	"github.com/penghongxia/rkcan/system"
 	"github.com/penghongxia/rkcan/timesync"
@@ -128,6 +135,9 @@ func (p *CANStatsProvider) tick() {
 	p.stats.SentFrames = atomic.LoadUint64(p.SentFrames)
 
 	for i, iface := range p.Ifaces {
+		if iface == "" {
+			continue
+		}
 		if info, err := candiag.GetCANInterfaceInfo(iface); err == nil {
 			if i == 0 {
 				p.stats.Can0Bitrate = info.Bitrate
@@ -162,35 +172,61 @@ func (p *CANStatsProvider) Get() CANStats {
 
 type Server struct {
 	httpServer     *http.Server
+	baseCtx        context.Context
+	baseCancel     context.CancelFunc
+	version        string
 	sysCollector   *system.Collector
 	canStats       *CANStatsProvider
 	wifiMgr        *wifi.Manager
 	serialReader   *serial.Reader
 	fileMgr        *filemanager.Manager
 	canIfaces      []string
+	canChannels    map[string]int
 	timeSyncSender *timesync.Sender
+	monitor        *cantool.Monitor
+	canSender      *cantool.Sender
+	player         *replay.Player
+	recorder       *replay.Recorder
 }
 
 type ServerConfig struct {
 	Port           int
+	Listen         string // listen host, empty = all interfaces
+	AuthUser       string // optional HTTP basic auth
+	AuthPass       string
+	Version        string
 	SysCollector   *system.Collector
 	CANStats       *CANStatsProvider
 	WifiMgr        *wifi.Manager
 	SerialReader   *serial.Reader
 	FileMgr        *filemanager.Manager
 	CANIfaces      []string
+	CANChannels    map[string]int // iface -> 1-based log channel
 	TimeSyncSender *timesync.Sender
+	Monitor        *cantool.Monitor
+	CANSender      *cantool.Sender
+	Player         *replay.Player
+	Recorder       *replay.Recorder
 }
 
 func NewServer(cfg ServerConfig) *Server {
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	s := &Server{
+		baseCtx:        baseCtx,
+		baseCancel:     baseCancel,
+		version:        cfg.Version,
 		sysCollector:   cfg.SysCollector,
 		canStats:       cfg.CANStats,
 		wifiMgr:        cfg.WifiMgr,
 		serialReader:   cfg.SerialReader,
 		fileMgr:        cfg.FileMgr,
 		canIfaces:      cfg.CANIfaces,
+		canChannels:    cfg.CANChannels,
 		timeSyncSender: cfg.TimeSyncSender,
+		monitor:        cfg.Monitor,
+		canSender:      cfg.CANSender,
+		player:         cfg.Player,
+		recorder:       cfg.Recorder,
 	}
 
 	mux := http.NewServeMux()
@@ -201,6 +237,7 @@ func NewServer(cfg ServerConfig) *Server {
 
 	// SSE endpoint for real-time data
 	mux.HandleFunc("/api/sse", s.handleSSE)
+	mux.HandleFunc("/api/version", s.handleVersion)
 
 	// System APIs
 	mux.HandleFunc("/api/system/overview", s.handleSystemOverview)
@@ -226,6 +263,8 @@ func NewServer(cfg ServerConfig) *Server {
 	// Serial APIs
 	mux.HandleFunc("/api/serial/ports", s.handleSerialPorts)
 	mux.HandleFunc("/api/serial/open", s.handleSerialOpen)
+	mux.HandleFunc("/api/serial/send", s.handleSerialSend)
+	mux.HandleFunc("/api/serial/status", s.handleSerialStatus)
 	mux.HandleFunc("/api/serial/close", s.handleSerialClose)
 	mux.HandleFunc("/api/serial/logs", s.handleSerialLogs)
 	mux.HandleFunc("/api/serial/sse", s.handleSerialSSE)
@@ -233,6 +272,8 @@ func NewServer(cfg ServerConfig) *Server {
 	// Chrony APIs
 	mux.HandleFunc("/api/chrony", s.handleChrony)
 	mux.HandleFunc("/api/chrony/config", s.handleChronyConfig)
+
+	s.registerToolRoutes(mux)
 
 	// File APIs
 	mux.HandleFunc("/api/files/list", s.handleFileList)
@@ -242,12 +283,21 @@ func NewServer(cfg ServerConfig) *Server {
 	mux.HandleFunc("/api/files/mkdir", s.handleFileMkdir)
 	mux.HandleFunc("/api/files/rename", s.handleFileRename)
 
+	var handler http.Handler = mux
+	if cfg.AuthUser != "" {
+		handler = basicAuthMiddleware(cfg.AuthUser, cfg.AuthPass, handler)
+	}
+	handler = recoverMiddleware(corsMiddleware(handler))
+
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
-		Handler:      corsMiddleware(mux),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 0, // SSE needs no write timeout
-		IdleTimeout:  120 * time.Second,
+		Addr:              net.JoinHostPort(cfg.Listen, strconv.Itoa(cfg.Port)),
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       0, // large uploads; bounded by MaxBytesReader
+		WriteTimeout:      0, // SSE needs no write timeout
+		IdleTimeout:       120 * time.Second,
+		// Long-lived SSE requests derive from baseCtx so Shutdown can end them
+		BaseContext: func(net.Listener) context.Context { return baseCtx },
 	}
 
 	return s
@@ -259,6 +309,8 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Cancel in-flight streaming requests (SSE), then drain the rest
+	s.baseCancel()
 	return s.httpServer.Shutdown(ctx)
 }
 
@@ -266,13 +318,59 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// basicAuthMiddleware protects every route with HTTP basic auth.
+func basicAuthMiddleware(user, pass string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		userOK := subtle.ConstantTimeCompare([]byte(u), []byte(user)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(p), []byte(pass)) == 1
+		if !ok || !userOK || !passOK {
+			w.Header().Set("WWW-Authenticate", `Basic realm="rkcan", charset="UTF-8"`)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// recoverMiddleware turns a handler panic into a 500 instead of killing the
+// connection without a response.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					panic(rec)
+				}
+				log.Printf("web: panic in %s %s: %v", r.Method, r.URL.Path, rec)
+				writeError(w, http.StatusInternalServerError, "internal error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{"version": s.version, "canIfaces": s.canIfaces})
+}
+
+// validIface reports whether iface is one of the configured CAN interfaces.
+func (s *Server) validIface(iface string) bool {
+	for _, i := range s.canIfaces {
+		if i == iface {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
@@ -298,29 +396,35 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	send := func() bool {
+		jsonData, err := json.Marshal(map[string]interface{}{
+			"system": s.sysCollector.Overview(),
+			"can":    s.canStats.Get(),
+		})
+		if err != nil {
+			return true
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", jsonData); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	if !send() {
+		return
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			overview := s.sysCollector.Overview()
-			canStats := s.canStats.Get()
-
-			data := map[string]interface{}{
-				"system": overview,
-				"can":    canStats,
+			if !send() {
+				return
 			}
-
-			jsonData, err := json.Marshal(data)
-			if err != nil {
-				continue
-			}
-
-			fmt.Fprintf(w, "data: %s\n\n", jsonData)
-			flusher.Flush()
 		}
 	}
 }
@@ -354,15 +458,20 @@ func (s *Server) handleSetTime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Format as MMDDhhmm[[CC]YY][.ss] for the `date` command.
 	t := time.UnixMilli(req.UnixMs).UTC()
-	dateStr := t.Format("01021504") + strconv.Itoa(t.Year()) + "." + fmt.Sprintf("%02d", t.Second())
-
-	out, err := exec.Command("date", "-u", "-s", t.Format("2006-01-02 15:04:05")).CombinedOutput()
-	if err != nil {
-		_ = dateStr // fallback format not needed
-		writeError(w, 500, fmt.Sprintf("Failed to set time: %v (%s)", err, strings.TrimSpace(string(out))))
+	if t.Year() < 2000 || t.Year() > 2100 {
+		writeError(w, 400, "Invalid time")
 		return
+	}
+
+	// Set the clock directly; fall back to date(1) if not permitted
+	tv := syscallTimeval(t)
+	if err := settimeofday(&tv); err != nil {
+		out, derr := exec.Command("date", "-u", "-s", t.Format("2006-01-02 15:04:05")).CombinedOutput()
+		if derr != nil {
+			writeError(w, 500, fmt.Sprintf("Failed to set time: %v (%s)", derr, strings.TrimSpace(string(out))))
+			return
+		}
 	}
 
 	// Best-effort: sync hardware clock if hwclock is available.
@@ -402,6 +511,13 @@ func (s *Server) handlePoweroff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "Invalid request")
 		return
 	}
+	if req.Action == "" {
+		req.Action = "poweroff"
+	}
+	if req.Action != "poweroff" && req.Action != "reboot" {
+		writeError(w, 400, "action must be poweroff or reboot")
+		return
+	}
 
 	go func() {
 		// Give the HTTP response a chance to be sent before killing the system
@@ -435,9 +551,18 @@ func (s *Server) handleCANStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.canStats.Get())
 }
 
+// GET /api/can/diagnostics[?iface=can0] returns one result per interface.
 func (s *Server) handleCANDiagnostics(w http.ResponseWriter, r *http.Request) {
-	results := make([]*candiag.DiagResult, 0, len(s.canIfaces))
-	for _, iface := range s.canIfaces {
+	ifaces := s.canIfaces
+	if iface := r.URL.Query().Get("iface"); iface != "" {
+		if !s.validIface(iface) {
+			writeError(w, 400, "Invalid interface")
+			return
+		}
+		ifaces = []string{iface}
+	}
+	results := make([]*candiag.DiagResult, 0, len(ifaces))
+	for _, iface := range ifaces {
 		results = append(results, candiag.RunDiagnostic(iface))
 	}
 	writeJSON(w, results)
@@ -445,18 +570,11 @@ func (s *Server) handleCANDiagnostics(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCANDetails(w http.ResponseWriter, r *http.Request) {
 	iface := r.URL.Query().Get("iface")
-	if iface == "" {
+	if iface == "" && len(s.canIfaces) > 0 {
 		iface = s.canIfaces[0]
 	}
 
-	valid := false
-	for _, i := range s.canIfaces {
-		if i == iface {
-			valid = true
-			break
-		}
-	}
-	if !valid {
+	if !s.validIface(iface) {
 		writeError(w, 400, "Invalid interface")
 		return
 	}
@@ -482,26 +600,32 @@ func (s *Server) handleCANConfigure(w http.ResponseWriter, r *http.Request) {
 		DBitrate     uint32  `json:"dbitrate"`
 		DSamplePoint float64 `json:"dsamplePoint"`
 		FD           bool    `json:"fd"`
+		RestartMS    *int    `json:"restartMs"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "Invalid request")
 		return
 	}
 
-	valid := false
-	for _, i := range s.canIfaces {
-		if i == req.Iface {
-			valid = true
-			break
-		}
-	}
-	if !valid {
+	if !s.validIface(req.Iface) {
 		writeError(w, 400, "Invalid interface")
 		return
 	}
 
-	if req.Bitrate == 0 {
-		writeError(w, 400, "Bitrate required")
+	if req.Bitrate == 0 || req.Bitrate > 1000000 {
+		writeError(w, 400, "Bitrate must be 1..1000000")
+		return
+	}
+	if req.SamplePoint < 0 || req.SamplePoint >= 1 || req.DSamplePoint < 0 || req.DSamplePoint >= 1 {
+		writeError(w, 400, "Sample point must be between 0 and 1 (e.g. 0.875)")
+		return
+	}
+	if req.FD && (req.DBitrate == 0 || req.DBitrate > 15000000) {
+		writeError(w, 400, "CAN-FD requires a data bitrate of 1..15000000")
+		return
+	}
+	if req.RestartMS != nil && (*req.RestartMS < 0 || *req.RestartMS > 60000) {
+		writeError(w, 400, "restartMs must be 0..60000")
 		return
 	}
 
@@ -510,18 +634,26 @@ func (s *Server) handleCANConfigure(w http.ResponseWriter, r *http.Request) {
 		"bitrate", strconv.FormatUint(uint64(req.Bitrate), 10)}
 
 	if req.SamplePoint > 0 {
-		cmdArgs = append(cmdArgs, "sample-point", fmt.Sprintf("%.2f", req.SamplePoint))
+		cmdArgs = append(cmdArgs, "sample-point", fmt.Sprintf("%.3f", req.SamplePoint))
 	}
 
-	if req.DBitrate > 0 {
+	// The FD control mode persists across reconfiguration, so turning it off
+	// must be explicit.
+	if req.FD {
 		cmdArgs = append(cmdArgs, "dbitrate", strconv.FormatUint(uint64(req.DBitrate), 10))
 		if req.DSamplePoint > 0 {
-			cmdArgs = append(cmdArgs, "dsample-point", fmt.Sprintf("%.2f", req.DSamplePoint))
+			cmdArgs = append(cmdArgs, "dsample-point", fmt.Sprintf("%.3f", req.DSamplePoint))
 		}
+		cmdArgs = append(cmdArgs, "fd", "on")
+	} else if mtu, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/mtu", req.Iface)); err == nil &&
+		strings.TrimSpace(string(mtu)) == "72" {
+		// Only switch FD off when it is on: controllers without CAN-FD
+		// support reject any change to the FD control mode bit.
+		cmdArgs = append(cmdArgs, "fd", "off")
 	}
 
-	if req.FD {
-		cmdArgs = append(cmdArgs, "fd", "on")
+	if req.RestartMS != nil {
+		cmdArgs = append(cmdArgs, "restart-ms", strconv.Itoa(*req.RestartMS))
 	}
 
 	// Bring interface down
@@ -554,7 +686,11 @@ func (s *Server) handleWiFiStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, status)
+	writeJSON(w, struct {
+		*wifi.Status
+		Backend string `json:"backend"`
+		Iface   string `json:"iface"`
+	}{status, s.wifiMgr.Backend(), s.wifiMgr.Iface()})
 }
 
 func (s *Server) handleWiFiScan(w http.ResponseWriter, r *http.Request) {
@@ -575,13 +711,18 @@ func (s *Server) handleWiFiConnect(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SSID     string `json:"ssid"`
 		Password string `json:"password"`
+		Hidden   bool   `json:"hidden"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, 400, "Invalid request")
 		return
 	}
+	if req.SSID == "" {
+		writeError(w, 400, "SSID required")
+		return
+	}
 
-	if err := s.wifiMgr.Connect(req.SSID, req.Password); err != nil {
+	if err := s.wifiMgr.Connect(req.SSID, req.Password, req.Hidden); err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
@@ -623,6 +764,58 @@ func (s *Server) handleSerialOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleSerialSend writes data to the open serial port.
+// POST /api/serial/send  body: {"data": "text or hex", "hex": bool}
+func (s *Server) handleSerialSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeError(w, 405, "Method not allowed")
+		return
+	}
+
+	var req struct {
+		Data string `json:"data"`
+		Hex  bool   `json:"hex"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		writeError(w, 400, "Invalid request")
+		return
+	}
+
+	payload := []byte(req.Data)
+	if req.Hex {
+		// Accept "AA BB", "AABB", "0xAA,0xBB"; a trailing newline from the
+		// UI's newline option is sent as 0x0A.
+		trailingNL := strings.HasSuffix(req.Data, "\n")
+		clean := strings.NewReplacer("0x", "", "0X", "", " ", "", ",", "", "\n", "", "\r", "", "\t", "").Replace(req.Data)
+		b, err := hex.DecodeString(clean)
+		if err != nil {
+			writeError(w, 400, "Invalid hex data")
+			return
+		}
+		if trailingNL {
+			b = append(b, '\n')
+		}
+		payload = b
+	}
+	if len(payload) == 0 {
+		writeError(w, 400, "No data")
+		return
+	}
+
+	if err := s.serialReader.Write(payload); err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, map[string]interface{}{"status": "ok", "bytes": len(payload)})
+}
+
+func (s *Server) handleSerialStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]interface{}{
+		"open":   s.serialReader.IsOpen(),
+		"config": s.serialReader.GetConfig(),
+	})
 }
 
 func (s *Server) handleSerialClose(w http.ResponseWriter, r *http.Request) {
@@ -687,11 +880,12 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, s.fileMgr.MaxSize+1024)
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, s.fileMgr.MaxSize+64*1024)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		writeError(w, 400, "File too large or invalid form")
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 
 	path := r.FormValue("path")
 	if path == "" {
@@ -727,9 +921,13 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
+	modTime := time.Time{}
+	if st, err := f.Stat(); err == nil {
+		modTime = st.ModTime()
+	}
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, name, time.Now(), f)
+	http.ServeContent(w, r, name, modTime, f)
 }
 
 func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
@@ -966,11 +1164,16 @@ func (s *Server) handleChrony(w http.ResponseWriter, r *http.Request) {
 	var mu sync.Mutex
 
 	runCmd := func(args ...string) string {
-		out, err := exec.Command("/userdata/chronyc", args...).CombinedOutput()
+		out, err := system.RunChronyc(args...)
 		if err != nil {
-			return fmt.Sprintf("Error: %v\n%s", err, string(out))
+			mu.Lock()
+			if res.Error == "" {
+				res.Error = fmt.Sprintf("chronyc %s: %v %s", args[0], err, strings.TrimSpace(out))
+			}
+			mu.Unlock()
+			return ""
 		}
-		return string(out)
+		return out
 	}
 
 	wg.Add(4)
@@ -997,10 +1200,10 @@ func (s *Server) handleChrony(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() {
 		defer wg.Done()
-		out, err := os.ReadFile("/etc/chrony.conf")
+		out, err := os.ReadFile(system.ChronyConfPath)
 		if err != nil {
 			mu.Lock()
-			res.Config = fmt.Sprintf("Error reading /etc/chrony.conf: %v", err)
+			res.Config = fmt.Sprintf("Error reading %s: %v", system.ChronyConfPath, err)
 			mu.Unlock()
 			return
 		}
@@ -1015,7 +1218,7 @@ func (s *Server) handleChrony(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "GET" {
-		out, err := os.ReadFile("/etc/chrony.conf")
+		out, err := os.ReadFile(system.ChronyConfPath)
 		if err != nil {
 			writeError(w, 500, fmt.Sprintf("Failed to read config: %v", err))
 			return
@@ -1028,11 +1231,11 @@ func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Config string `json:"config"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256*1024)).Decode(&req); err != nil {
 			writeError(w, 400, "Invalid request")
 			return
 		}
-		if err := os.WriteFile("/etc/chrony.conf", []byte(req.Config), 0644); err != nil {
+		if err := writeFileAtomic(system.ChronyConfPath, []byte(req.Config), 0644); err != nil {
 			writeError(w, 500, fmt.Sprintf("Failed to write config: %v", err))
 			return
 		}
@@ -1048,7 +1251,7 @@ func (s *Server) handleChronyConfig(w http.ResponseWriter, r *http.Request) {
 // GET  /api/can/timesync  → { "enabled": bool, "iface": string, "protocol": string, "brs": bool }
 // POST /api/can/timesync  ← { "enabled": bool, "iface": string, "protocol": string, "brs": bool }
 //
-//	→ { "status": "ok", "enabled": bool, "iface": string, "protocol": string }
+//	→ { "status": "ok", "enabled": bool, "iface": string, "protocol": string, "brs": bool }
 func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 	if s.timeSyncSender == nil {
 		writeError(w, 503, "Time sync not available")
@@ -1078,14 +1281,7 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Validate interface name
-		valid := false
-		for _, i := range s.canIfaces {
-			if i == req.Iface {
-				valid = true
-				break
-			}
-		}
-		if req.Enabled && !valid {
+		if req.Enabled && !s.validIface(req.Iface) {
 			writeError(w, 400, "Invalid CAN interface")
 			return
 		}
@@ -1114,4 +1310,31 @@ func (s *Server) handleCANTimeSync(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, 405, "Method not allowed")
 	}
+}
+
+// writeFileAtomic writes data to a temp file in the same directory and
+// renames it over path, so readers never see a partially written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmpName, perm)
+	}
+	if err == nil {
+		err = os.Rename(tmpName, path)
+	}
+	if err != nil {
+		os.Remove(tmpName)
+	}
+	return err
 }

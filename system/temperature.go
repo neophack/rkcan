@@ -77,7 +77,7 @@ func (c *TempCollector) Collect() {
 				name = strings.TrimSpace(string(nameData))
 			}
 			if name == "" {
-				name = fmt.Sprintf("hwmon%d_temp%d", i, i)
+				name = fmt.Sprintf("%s_temp%d", filepath.Base(hwmon), i)
 			}
 			temps = append(temps, TempInfo{
 				Zone: filepath.Base(hwmon),

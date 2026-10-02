@@ -37,12 +37,15 @@ window.api = function (url, options) {
     }).then(function (resp) {
         if (!resp.ok) {
             return resp.text().then(function (text) {
-                throw new Error(text || 'HTTP ' + resp.status);
+                var msg = text;
+                try { msg = JSON.parse(text).error || text; } catch (e) { /* plain text */ }
+                if (resp.status === 401) msg = '需要登录 (Unauthorized)';
+                throw new Error(msg || 'HTTP ' + resp.status);
             });
         }
         return resp.json();
     }).catch(function (err) {
-        window.showToast('API error: ' + err.message, 'error');
+        window.showToast(err.message, 'error');
         throw err;
     });
 };
