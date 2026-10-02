@@ -155,7 +155,7 @@ int main(int argc, char *argv[])
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count();
                     printf("[%lldms] total=%u fd=%u brs=%u seq_gap=%u crc_err=%u sync_err=%u | seq=%u mcu_rel=%u us qnx=%s\n",
-                           elapsed, pktCount, fdCount, brsCount, seqGapCount, crcErrCount, syncErrCount,
+                           (long long)elapsed, pktCount, fdCount, brsCount, seqGapCount, crcErrCount, syncErrCount,
                            lastSeq, lastMcuRelUs, qnxStr);
                     lastReport = now;
                     lastPrintedCount = pktCount;
@@ -247,7 +247,7 @@ int main(int argc, char *argv[])
             char qnxStr[64];
             formatUtcUs(lastQnxUtcUs, qnxStr, sizeof(qnxStr));
             printf("[%lldms] total=%u fd=%u brs=%u seq_gap=%u crc_err=%u sync_err=%u | seq=%u mcu_rel=%u us qnx=%s\n",
-                   elapsed, pktCount, fdCount, brsCount, seqGapCount, crcErrCount, syncErrCount,
+                   (long long)elapsed, pktCount, fdCount, brsCount, seqGapCount, crcErrCount, syncErrCount,
                    lastSeq, lastMcuRelUs, qnxStr);
             lastReport = now;
             lastPrintedCount = pktCount;
