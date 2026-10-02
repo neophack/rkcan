@@ -24,7 +24,7 @@
         var html = '<span title="' + pct + '%">';
         for (var i = 1; i <= 4; i++) {
             var h = 4 + i * 4;
-            var barColor = i <= filled ? color : '#475569';
+            var barColor = i <= filled ? color : '#3c3c3c';
             html += '<span style="display:inline-block;width:3px;height:' + h +
                 'px;background:' + barColor + ';margin-right:1px;vertical-align:bottom;border-radius:1px;"></span>';
         }
@@ -59,7 +59,11 @@
         window.api('/api/wifi/scan').then(function (data) {
             var networks = Array.isArray(data) ? data : (data && data.networks) || [];
             renderScanResults(networks);
-        }).catch(function () {}).finally(function () {
+        }).catch(function (err) {
+            var tbody = document.getElementById('wifi-scan-tbody');
+            if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="text-muted center">扫描失败: ' +
+                window.escapeHtml(err && err.message || '') + '</td></tr>';
+        }).finally(function () {
             if (scanBtn) scanBtn.disabled = false;
         });
     }
@@ -69,7 +73,7 @@
         if (!tbody) return;
 
         if (networks.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#64748b;">No networks found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#8b8b8b;">No networks found</td></tr>';
             return;
         }
 

@@ -64,7 +64,7 @@
 
         for (var i = 0; i < parts.length; i++) {
             accumulated += '/' + parts[i];
-            html += ' <span style="color:#64748b;">/</span> ';
+            html += ' <span style="color:#8b8b8b;">/</span> ';
             html += '<span class="breadcrumb-item" data-path="' + window.escapeHtml(accumulated) + '">' +
                 window.escapeHtml(parts[i]) + '</span>';
         }
@@ -96,7 +96,7 @@
         if (!tbody) return;
 
         if (files.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#64748b;">Empty directory</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#8b8b8b;">Empty directory</td></tr>';
             return;
         }
 
@@ -130,12 +130,12 @@
             html += '<td class="file-col-actions">';
             if (!f.isDir) {
                 html += '<button class="btn btn-sm file-download-btn" data-path="' +
-                    window.escapeHtml(fullPath) + '">DL</button> ';
+                    window.escapeHtml(fullPath) + '">下载</button> ';
             }
             html += '<button class="btn btn-sm file-rename-btn" data-path="' +
-                window.escapeHtml(fullPath) + '" data-name="' + window.escapeHtml(f.name) + '">Ren</button> ';
+                window.escapeHtml(fullPath) + '" data-name="' + window.escapeHtml(f.name) + '">重命名</button> ';
             html += '<button class="btn btn-sm file-delete-btn" data-path="' +
-                window.escapeHtml(fullPath) + '" data-name="' + window.escapeHtml(f.name) + '">Del</button>';
+                window.escapeHtml(fullPath) + '" data-name="' + window.escapeHtml(f.name) + '">删除</button>';
             html += '</td>';
             html += '</tr>';
         }
@@ -183,7 +183,12 @@
 
     function renameFile(oldPath, oldName) {
         var newName = prompt('Rename "' + oldName + '" to:', oldName);
+        if (newName) newName = newName.trim();
         if (!newName || newName === oldName) return;
+        if (newName.indexOf('/') >= 0 || newName === '.' || newName === '..') {
+            window.showToast('Invalid name', 'error');
+            return;
+        }
 
         var parentDir = currentPath;
         var newPath = joinPath(parentDir, newName);
@@ -257,22 +262,33 @@
             formData.append('path', currentPath);
             formData.append('file', fileList[idx]);
 
-            fetch('/api/files/upload', {
-                method: 'POST',
-                body: formData,
-            }).then(function (resp) {
-                if (!resp.ok) {
-                    return resp.text().then(function (t) { throw new Error(t || 'Upload failed'); });
+            // XHR (not fetch) so upload progress can be shown
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/files/upload');
+            xhr.upload.onprogress = function (e) {
+                if (!e.lengthComputable || !progressBar) return;
+                var pct = ((idx + e.loaded / e.total) / total) * 100;
+                progressBar.style.width = pct.toFixed(1) + '%';
+            };
+            xhr.onload = function () {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    uploaded++;
+                    if (progressText) progressText.textContent = uploaded + '/' + total;
+                    uploadNext(idx + 1);
+                    return;
                 }
-                return resp.json();
-            }).then(function () {
-                uploaded++;
-                if (progressText) progressText.textContent = uploaded + '/' + total;
-                uploadNext(idx + 1);
-            }).catch(function (err) {
-                window.showToast('Upload error: ' + err.message, 'error');
+                var msg = xhr.responseText;
+                try { msg = JSON.parse(msg).error || msg; } catch (e) { /* plain text */ }
+                if (xhr.status === 413) msg = 'File too large';
+                window.showToast('Upload failed (' + fileList[idx].name + '): ' + (msg || xhr.status), 'error');
                 if (progressEl) progressEl.hidden = true;
-            });
+                loadFiles();
+            };
+            xhr.onerror = function () {
+                window.showToast('Upload failed: network error', 'error');
+                if (progressEl) progressEl.hidden = true;
+            };
+            xhr.send(formData);
         }
 
         uploadNext(0);

@@ -34,7 +34,7 @@
     }
 
     function tempColor(temp) {
-        if (temp < 50) return '#14b8a6';
+        if (temp < 50) return '#4ec9b0';
         if (temp <= 70) return '#eab308';
         return '#ef4444';
     }
@@ -48,23 +48,23 @@
 
         if (cpuCanvas) {
             cpuChart = new LineChart(cpuCanvas, {
-                lineColor: '#3b82f6',
+                lineColor: '#3794ff',
                 fillColor: 'rgba(59,130,246,0.12)',
                 yMax: 100,
                 yLabel: '%',
-                background: '#1e293b',
-                gridColor: '#334155',
+                background: '#1e1e1e',
+                gridColor: '#2b2b2b',
             });
         }
 
         if (memCanvas) {
             memChart = new LineChart(memCanvas, {
-                lineColor: '#14b8a6',
+                lineColor: '#4ec9b0',
                 fillColor: 'rgba(20,184,166,0.12)',
                 yMax: 100,
                 yLabel: '%',
-                background: '#1e293b',
-                gridColor: '#334155',
+                background: '#1e1e1e',
+                gridColor: '#2b2b2b',
             });
         }
 
@@ -75,12 +75,12 @@
                 autoScale: true,
                 yLabel: 'KB/s',
                 showValue: false,
-                background: '#1e293b',
-                gridColor: '#334155',
+                background: '#1e1e1e',
+                gridColor: '#2b2b2b',
                 padding: { top: 8, right: 8, bottom: 20, left: 60 },
             });
             netTxIndex = netChart.addSeries({
-                color: '#f97316',
+                color: '#d18616',
                 fillColor: 'rgba(249,115,22,0.08)',
                 label: 'TX',
             });
@@ -93,8 +93,8 @@
                 fillColor: 'rgba(239,68,68,0.12)',
                 yMax: 100,
                 yLabel: '\u00B0C',
-                background: '#1e293b',
-                gridColor: '#334155',
+                background: '#1e1e1e',
+                gridColor: '#2b2b2b',
             });
         }
     }
@@ -144,7 +144,7 @@
             var status = data.time.chronyLeapStatus;
             syncEl.textContent = status;
             if (status === 'Normal') {
-                syncEl.style.color = '#14b8a6';
+                syncEl.style.color = '#4ec9b0';
             } else if (status === 'Not synchronised') {
                 syncEl.style.color = '#ef4444';
             } else {

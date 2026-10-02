@@ -3,15 +3,15 @@
  */
 
 var ChartColors = Object.freeze({
-    CPU:         '#3b82f6',
-    Memory:      '#14b8a6',
+    CPU:         '#3794ff',
+    Memory:      '#4ec9b0',
     NetworkRX:   '#eab308',
-    NetworkTX:   '#f97316',
+    NetworkTX:   '#d18616',
     Temperature: '#ef4444',
-    Background:  '#1e293b',
-    GridLine:    '#334155',
+    Background:  '#1e1e1e',
+    GridLine:    '#2b2b2b',
     Text:        '#e2e8f0',
-    TextDim:     '#94a3b8',
+    TextDim:     '#8b8b8b',
 });
 
 function niceMax(max) {
