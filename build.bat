@@ -1,114 +1,69 @@
 @echo off
 chcp 65001 >nul
-echo ========================================
-echo  RKCAN - Dual CAN-FD to UDP Bridge
-echo  Build Script
-echo ========================================
-echo.
+setlocal enabledelayedexpansion
+rem ===================================================================
+rem  RKCAN build script for Windows
+rem  Builds install packages in dist\rkcan-linux-<arch>\ containing the
+rem  binary and the installer. Copy one folder to the board and run:
+rem      sh install.sh
+rem ===================================================================
 
-REM Check Go installation
 where go >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [ERROR] Go not found. Please install Go first.
-    echo Download: https://golang.org/dl/
+    echo [ERROR] Go not found. Install it from https://go.dev/dl/
     pause
     exit /b 1
 )
 
-echo [1/5] Checking Go version...
-go version
+for /f "delims=" %%v in ('git describe --tags --always --dirty 2^>nul') do set VERSION=%%v
+if "%VERSION%"=="" set VERSION=dev
+echo Building RKCAN %VERSION%
 echo.
 
-REM Initialize go mod if missing
-if not exist "go.mod" (
-    echo [2/5] Initializing Go module...
-    go mod init github.com/penghongxia/rkcan
-    echo.
-) else (
-    echo [2/5] Go module already exists, skipping
-echo.
-)
-
-echo [3/5] Tidying dependencies...
-go mod tidy
-if %errorlevel% neq 0 (
-    echo [ERROR] go mod tidy failed!
-    pause
-    exit /b 1
-)
-echo.
-
-echo [4/5] Building for Linux...
-echo.
-
-REM Linux ARM32 (older RK boards)
-echo   - Building linux/arm ...
-set GOOS=linux
-set GOARCH=arm
-set GOARM=7
 set CGO_ENABLED=0
-go build -ldflags="-s -w" -o rkcan-linux-arm32 .
-if %errorlevel% neq 0 (
-    echo [ERROR] linux/arm build failed!
-    pause
-    exit /b 1
-)
-echo     OK: rkcan-linux-arm32
+set GOOS=linux
+set LDFLAGS=-s -w -X main.version=%VERSION%
 
+call :build arm64 arm64 ""
+if errorlevel 1 goto :fail
+call :build arm32 arm 7
+if errorlevel 1 goto :fail
 
 echo.
-echo ========================================
+echo ===================================================================
 echo  Build SUCCESS
-echo ========================================
+echo ===================================================================
+echo  Packages:
+echo    dist\rkcan-linux-arm64   (RK3566/RK3568/RK3588/RK3576 64-bit)
+echo    dist\rkcan-linux-arm32   (RK3288 / 32-bit systems)
 echo.
-dir rkcan-linux-* /b
+echo  Install on the board:
+echo    scp -r dist\rkcan-linux-arm64 root@^<board-ip^>:/tmp/
+echo    ssh root@^<board-ip^> "cd /tmp/rkcan-linux-arm64 && sh install.sh"
 echo.
-
-echo ========================================
-echo  Deployment Guide
-echo ========================================
-echo.
-echo 1. Choose the correct binary for your target device:
-echo    - RK3288 / older boards : rkcan-linux-arm32
-echo.
-echo 2. Upload to target (10.0.0.100) via SCP:
-echo    scp rkcan-linux-arm32 root@10.0.0.100:/userdata/rkcan
-echo    Password: yfcommon
-echo.
-echo    If you have sshpass installed:
-echo    sshpass -p "yfcommon" scp rkcan-linux-arm32 root@10.0.0.100:/userdata/rkcan
-echo.
-echo 3. On the target device, run:
-echo    chmod +x /userdata/rkcan
-echo    cd /userdata
-echo.
-echo    # Run with defaults (can0+can1 -> UDP broadcast port 6000)
-echo    ./rkcan
-echo.
-echo    # Run with custom target (e.g. local receiver)
-echo    ./rkcan -addr 127.0.0.1:6000
-echo.
-echo    # Run with different CAN interfaces
-echo    ./rkcan -can0 can0 -can1 can1 -addr 10.0.0.100:6000
-echo.
-echo 4. Receiver (UdpCanFdReceiver) usage on PC:
-echo    udp_canfd_recv 6000
-echo.
-echo ========================================
-echo  CAN Interface Setup (run on target)
-echo ========================================
-echo.
-echo    # CAN-FD mode (recommended)
-echo    sudo ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on
-echo    sudo ip link set up can0
-echo    sudo ip link set can1 type can bitrate 500000 dbitrate 2000000 fd on
-echo    sudo ip link set up can1
-echo.
-echo    # Classic CAN mode
-echo    sudo ip link set can0 type can bitrate 500000
-echo    sudo ip link set up can0
-echo    sudo ip link set can1 type can bitrate 500000
-echo    sudo ip link set up can1
-echo.
-echo ========================================
+echo  Then open http://^<board-ip^>/ in a browser.
+echo ===================================================================
 pause
+exit /b 0
+
+:build
+set ARCH=%~1
+set GOARCH=%~2
+set GOARM=%~3
+set OUT=dist\rkcan-linux-%ARCH%
+echo   - linux/%ARCH% ...
+if exist "%OUT%" rmdir /s /q "%OUT%"
+mkdir "%OUT%"
+go build -trimpath -ldflags="%LDFLAGS%" -o "%OUT%\rkcan" .
+if errorlevel 1 exit /b 1
+for %%f in (install.sh uninstall.sh rkcan.conf rkcan-can-setup rkcan-ctl rkcan.service rkcan-can.service rkcan.init) do (
+    copy /y "deploy\%%f" "%OUT%\" >nul
+)
+copy /y README.md "%OUT%\" >nul
+echo     OK: %OUT%
+exit /b 0
+
+:fail
+echo [ERROR] build failed
+pause
+exit /b 1

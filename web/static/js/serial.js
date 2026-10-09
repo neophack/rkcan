@@ -288,7 +288,34 @@
             initialized = true;
         }
         loadPorts();
+        restoreState();
     };
+
+    // Re-sync UI with a port that is already open on the device (e.g. after
+    // a page reload).
+    function restoreState() {
+        fetch('/api/serial/status').then(function (resp) {
+            return resp.ok ? resp.json() : null;
+        }).then(function (st) {
+            if (!st) return;
+            setPortOpenState(!!st.open);
+            if (st.open) {
+                var c = st.config || {};
+                var sel = $('serial-port');
+                if (sel && c.port) {
+                    if (!Array.prototype.some.call(sel.options, function (o) { return o.value === c.port; })) {
+                        var opt = document.createElement('option');
+                        opt.value = c.port;
+                        opt.textContent = c.port;
+                        sel.appendChild(opt);
+                    }
+                    sel.value = c.port;
+                }
+                if (c.baudRate && $('serial-baud')) $('serial-baud').value = String(c.baudRate);
+                if (!sseSource) connectSSE();
+            }
+        }).catch(function () { /* non-critical */ });
+    }
 
     window.registerTabInit('serial', window.initSerial);
 

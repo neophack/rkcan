@@ -25,6 +25,11 @@
         <circle cx="12" cy="12" r="3"/>
       </svg>
     </div>
+    <div class="sidebar-icon" data-tab="replay" data-tooltip="回放 / 记录">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="6 4 20 12 6 20 6 4"/>
+      </svg>
+    </div>
     <div class="sidebar-icon" data-tab="wifi" data-tooltip="WiFi">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M5 12.55a11 11 0 0 1 14 0"/>
@@ -200,6 +205,10 @@
                   <span class="can-status-label">Data Sample:</span>
                   <span class="can-status-value" id="can0-dsamplept">--</span>
                 </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">BRS RX:</span>
+                  <span class="can-status-value" id="can0-rxbrs">--</span>
+                </div>
               </div>
             </div>
           </div>
@@ -233,6 +242,10 @@
                 <div class="can-status-line">
                   <span class="can-status-label">Data Sample:</span>
                   <span class="can-status-value" id="can1-dsamplept">--</span>
+                </div>
+                <div class="can-status-line">
+                  <span class="can-status-label">BRS RX:</span>
+                  <span class="can-status-value" id="can1-rxbrs">--</span>
                 </div>
               </div>
             </div>
@@ -321,6 +334,15 @@
               </div>
               <div class="form-group" style="display:flex;align-items:center;gap:10px;margin-bottom:1px;">
                 <label class="switch-label">
+                  <span>BRS 加速</span>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="timesync-brs-toggle">
+                    <span class="toggle-slider"></span>
+                  </label>
+                </label>
+              </div>
+              <div class="form-group" style="display:flex;align-items:center;gap:10px;margin-bottom:1px;">
+                <label class="switch-label">
                   <span>发送开关</span>
                   <label class="toggle-switch">
                     <input type="checkbox" id="timesync-enable-toggle">
@@ -330,8 +352,60 @@
               </div>
             </div>
             <div style="margin-top:8px;font-size:12px;color:var(--text-muted);">
-              每 500 ms 向选定接口发送一对时间同步帧。0x5A4 (EEA2.1): TimeDomain 高位 | Seq 低位；0x594 (EEA3.0): Seq 高位 | TimeDomain 低位。
+              每 500 ms 向选定接口发送一对时间同步帧。0x5A4 (EEA2.1): TimeDomain 高位 | Seq 低位；0x594 (EEA3.0): Seq 高位 | TimeDomain 低位。BRS 开启时以 CAN-FD 数据段波特率 (dbitrate) 发送数据段，需接口已配置 fd on 和 dbitrate。
             </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">发送报文</div>
+          <div class="card-body">
+            <div class="cantx-row">
+              <div class="form-group"><label>接口</label>
+                <select id="cantx-iface" class="form-select can-iface-select"></select></div>
+              <div class="form-group"><label>ID (hex)</label>
+                <input type="text" id="cantx-id" class="form-input mono" value="123" maxlength="10" style="width:110px"></div>
+              <div class="form-group cantx-flags">
+                <label class="checkbox-label"><input type="checkbox" id="cantx-ext"> 扩展帧</label>
+                <label class="checkbox-label"><input type="checkbox" id="cantx-fd" checked> CAN-FD</label>
+                <label class="checkbox-label"><input type="checkbox" id="cantx-brs" checked> BRS</label>
+                <label class="checkbox-label"><input type="checkbox" id="cantx-rtr"> 远程帧</label>
+              </div>
+              <div class="form-group" style="flex:1;min-width:220px"><label>数据 (hex，空格分隔) <span id="cantx-len" class="text-muted"></span></label>
+                <input type="text" id="cantx-data" class="form-input mono" value="01 02 03 04 05 06 07 08"></div>
+            </div>
+            <div class="cantx-row">
+              <button class="btn btn-sm btn-primary" id="cantx-send">发送一次</button>
+              <span class="cantx-sep"></span>
+              <div class="form-group"><label>周期 (ms)</label>
+                <input type="number" id="cantx-interval" class="form-input" value="100" min="1" style="width:90px"></div>
+              <div class="form-group"><label>次数 (0=持续)</label>
+                <input type="number" id="cantx-count" class="form-input" value="0" min="0" style="width:90px"></div>
+              <button class="btn btn-sm btn-primary" id="cantx-periodic">周期发送</button>
+              <button class="btn btn-sm btn-danger" id="cantx-stopall">全部停止</button>
+            </div>
+            <table class="data-table" id="cantx-tasks" style="margin-top:8px">
+              <thead><tr><th>#</th><th>接口</th><th>ID</th><th>类型</th><th>数据</th><th>周期</th><th>已发送</th><th>错误</th><th></th></tr></thead>
+              <tbody id="cantx-tasks-body"><tr><td colspan="9" class="text-muted center">无周期任务</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            实时报文监控 <span class="card-header-badge" id="canmon-summary">--</span>
+            <div class="card-header-actions">
+              <select id="canmon-iface" class="form-select form-select-sm"><option value="">全部接口</option></select>
+              <input type="text" id="canmon-filter" class="form-input mono" placeholder="ID 过滤" style="width:110px;height:22px">
+              <button class="btn btn-sm" id="canmon-pause">暂停</button>
+              <button class="btn btn-sm" id="canmon-reset">清空</button>
+            </div>
+          </div>
+          <div class="card-body card-body-table" style="max-height:420px;overflow-y:auto;">
+            <table class="data-table mono" id="canmon-table">
+              <thead><tr><th>接口</th><th>ID</th><th>类型</th><th>长度</th><th>数据</th><th>周期 (ms)</th><th>计数</th></tr></thead>
+              <tbody id="canmon-body"><tr><td colspan="7" class="text-muted center">等待报文…</td></tr></tbody>
+            </table>
           </div>
         </div>
 
@@ -383,6 +457,84 @@
 
       </div>
 
+      <!-- ==================== Replay / Record Tab ==================== -->
+      <div id="tab-replay" class="tab-panel">
+        <div class="card">
+          <div class="card-header">
+            存储 (TF 卡 / U 盘)
+            <div class="card-header-actions"><button class="btn btn-sm btn-primary" id="storage-refresh">刷新</button></div>
+          </div>
+          <div class="card-body card-body-table">
+            <table class="data-table">
+              <thead><tr><th>位置</th><th>设备</th><th>文件系统</th><th>容量</th><th>可用</th><th></th></tr></thead>
+              <tbody id="storage-body"><tr><td colspan="6" class="text-muted center">加载中…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            报文回放 (ASC / BLF)
+            <span class="card-header-badge" id="replay-badge">空闲</span>
+            <div class="card-header-actions"><button class="btn btn-sm btn-primary" id="replay-files-refresh">刷新文件</button></div>
+          </div>
+          <div class="card-body">
+            <div class="replay-row">
+              <div class="form-group" style="flex:1;min-width:280px"><label>日志文件</label>
+                <select id="replay-file" class="form-select"><option value="">-- 选择文件 --</option></select></div>
+            </div>
+            <div class="replay-info text-muted" id="replay-info">选择文件后显示帧数、时长和通道。</div>
+            <div class="replay-row" id="replay-chanmap"></div>
+            <div class="replay-row">
+              <div class="form-group"><label>回放速度</label>
+                <select id="replay-speed" class="form-select">
+                  <option value="0.1">0.1×</option><option value="0.25">0.25×</option><option value="0.5">0.5×</option>
+                  <option value="1" selected>1× 实时</option><option value="2">2×</option><option value="5">5×</option>
+                  <option value="10">10×</option><option value="50">50×</option><option value="100">100×</option>
+                  <option value="0">最快 (不等待)</option>
+                </select></div>
+              <div class="form-group"><label>BRS</label>
+                <select id="replay-brs" class="form-select">
+                  <option value="keep">按文件</option><option value="on">强制开启</option><option value="off">强制关闭</option>
+                </select></div>
+              <div class="form-group"><label>方向</label>
+                <select id="replay-dir" class="form-select">
+                  <option value="all">全部</option><option value="rx">仅 Rx</option><option value="tx">仅 Tx</option>
+                </select></div>
+              <div class="form-group" style="padding-top:18px"><label class="checkbox-label"><input type="checkbox" id="replay-loop"> 循环播放</label></div>
+            </div>
+            <div class="replay-row">
+              <button class="btn btn-sm btn-primary" id="replay-start">▶ 开始</button>
+              <button class="btn btn-sm" id="replay-pause" disabled>⏸ 暂停</button>
+              <button class="btn btn-sm btn-danger" id="replay-stop" disabled>■ 停止</button>
+            </div>
+            <div class="progress"><div class="progress-bar" id="replay-progress"></div></div>
+            <div class="replay-stats mono" id="replay-stats">--</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            报文记录 (保存为 ASC)
+            <span class="card-header-badge" id="record-badge">未记录</span>
+          </div>
+          <div class="card-body">
+            <div class="replay-row">
+              <div class="form-group" style="flex:1;min-width:220px"><label>保存位置</label>
+                <select id="record-dir" class="form-select"></select></div>
+              <div class="form-group"><label>接口</label><div id="record-ifaces" class="record-ifaces"></div></div>
+              <div class="form-group"><label>分割大小 (MB, 0=不分割)</label>
+                <input type="number" id="record-maxsize" class="form-input" value="100" min="0" style="width:110px"></div>
+            </div>
+            <div class="replay-row">
+              <button class="btn btn-sm btn-primary" id="record-start">● 开始记录</button>
+              <button class="btn btn-sm btn-danger" id="record-stop" disabled>■ 停止</button>
+            </div>
+            <div class="replay-stats mono" id="record-stats">--</div>
+          </div>
+        </div>
+      </div>
+
       <!-- ==================== WiFi Tab ==================== -->
       <div id="tab-wifi" class="tab-panel">
         <div class="wifi-layout">
@@ -422,7 +574,19 @@
                 </div>
                 <div class="wifi-actions">
                   <button class="btn btn-sm btn-danger" id="wifi-disconnect-btn" disabled>Disconnect</button>
+                  <button class="btn btn-sm" id="wifi-hidden-btn">连接隐藏网络…</button>
                 </div>
+                <div class="text-muted" id="wifi-backend" style="margin-top:8px;font-size:12px"></div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-header">已保存的网络
+                <div class="card-header-actions"><button class="btn btn-sm" id="wifi-saved-refresh">刷新</button></div>
+              </div>
+              <div class="card-body card-body-table">
+                <table class="data-table">
+                  <tbody id="wifi-saved-body"><tr><td class="text-muted center">--</td></tr></tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -454,8 +618,10 @@
               <button class="modal-close" id="wifi-modal-close">&times;</button>
             </div>
             <div class="modal-body">
-              <div class="form-group"><label>SSID:</label><input type="text" id="wifi-connect-ssid" class="form-input" readonly></div>
-              <div class="form-group"><label>Password:</label><input type="password" id="wifi-connect-password" class="form-input" placeholder="Enter WiFi password"></div>
+              <div class="form-group"><label>SSID:</label><input type="text" id="wifi-connect-ssid" class="form-input" readonly maxlength="32"></div>
+              <div class="form-group"><label>Password:</label><input type="password" id="wifi-connect-password" class="form-input" placeholder="Enter WiFi password (empty for open network)"></div>
+              <label class="checkbox-label" id="wifi-connect-hidden-row" style="display:none"><input type="checkbox" id="wifi-connect-hidden"> 隐藏网络 (SSID 不广播)</label>
+              <div class="text-muted" id="wifi-connect-progress" style="display:none;margin-top:8px">正在连接并获取 IP，最长约 30 秒…</div>
             </div>
             <div class="modal-footer">
               <button class="btn btn-sm" id="wifi-connect-cancel">Cancel</button>
@@ -745,6 +911,8 @@
 <script src="js/app.js"></script>
 <script src="js/dashboard.js"></script>
 <script src="js/can.js"></script>
+<script src="js/cantools.js"></script>
+<script src="js/replay.js"></script>
 <script src="js/wifi.js"></script>
 <script src="js/serial.js"></script>
 <script src="js/files.js"></script>

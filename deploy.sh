@@ -1,45 +1,32 @@
-#!/bin/bash
-# RKCAN Deploy Script
-# Uploads the ARM64 binary to root@10.0.0.100:/userdata
-
-HOST="root@10.0.0.100"
-PASS="yfcommon"
-FILE="rkcan-linux-arm64"
-DEST="/userdata/rkcan"
-
+#!/bin/sh
+# Build (if needed) and install RKCAN on a board over SSH.
+#
+#   ./deploy.sh [host] [arch]        e.g. ./deploy.sh root@10.0.0.100 arm64
+#
+# Environment: RKCAN_HOST (default root@10.0.0.100), RKCAN_ARCH (arm64),
+# RKCAN_PASS (password for sshpass; omit to use SSH keys / prompt).
 set -e
 
-if [ ! -f "$FILE" ]; then
-    echo "ERROR: $FILE not found. Please run build.bat first."
-    exit 1
+HOST=${1:-${RKCAN_HOST:-root@10.0.0.100}}
+ARCH=${2:-${RKCAN_ARCH:-arm64}}
+PASS=${RKCAN_PASS:-yfcommon}
+
+cd "$(dirname "$0")"
+make package >/dev/null
+# shellcheck disable=SC2012
+PKG=$(ls -t dist/rkcan-*-linux-"$ARCH".tar.gz | head -n 1)
+[ -n "$PKG" ] || { echo "no package for $ARCH"; exit 1; }
+NAME=$(basename "$PKG" .tar.gz)
+
+if [ -n "$PASS" ] && command -v sshpass >/dev/null 2>&1; then
+    SSH="sshpass -p $PASS ssh -o StrictHostKeyChecking=accept-new"
+    SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=accept-new"
+else
+    SSH="ssh"
+    SCP="scp"
 fi
 
-if command -v sshpass &> /dev/null; then
-    echo "Uploading $FILE to $HOST:$DEST ..."
-    sshpass -p "$PASS" scp "$FILE" "$HOST:$DEST"
-    echo "Setting executable permission..."
-    sshpass -p "$PASS" ssh "$HOST" "chmod +x $DEST"
-    echo ""
-    echo "========================================"
-    echo "  Deploy SUCCESS"
-    echo "========================================"
-    echo ""
-    echo "To start on the target device:"
-    echo "  sshpass -p '$PASS' ssh $HOST"
-    echo "  $DEST"
-    echo ""
-else
-    echo "========================================"
-    echo "  Manual Deploy Commands"
-    echo "========================================"
-    echo ""
-    echo "sshpass not found. Please run the following manually:"
-    echo ""
-    echo "  scp $FILE $HOST:$DEST"
-    echo "  ssh $HOST"
-    echo "  chmod +x $DEST"
-    echo "  $DEST"
-    echo ""
-    echo "Password when prompted: $PASS"
-    echo ""
-fi
+echo "==> Uploading $PKG to $HOST"
+$SCP "$PKG" "$HOST:/tmp/"
+echo "==> Installing"
+$SSH "$HOST" "cd /tmp && tar xzf $NAME.tar.gz && cd $NAME && sh install.sh && cd /tmp && rm -rf $NAME $NAME.tar.gz"

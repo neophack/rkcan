@@ -31,6 +31,13 @@ static void sigHandler(int sig)
 #define UDP_PORT 6000
 #define RECV_BUF_SIZE (64 * 1024)
 
+/* Optional flag bits in the DLC byte (sender started with -udpflags).
+ * Low nibble is always the DLC (0..15). */
+#define DLC_MASK     0x0F
+#define DLC_FLAG_FD  0x10
+#define DLC_FLAG_BRS 0x20
+#define DLC_FLAG_ESI 0x40
+
 static uint32_t crc32(const uint8_t *data, uint32_t len)
 {
     uint32_t crc = 0xFFFFFFFF;
@@ -123,6 +130,8 @@ int main(int argc, char *argv[])
     uint32_t syncErrCount = 0;
     uint32_t lastSeq = 0;
     uint32_t seqGapCount = 0;
+    uint32_t fdCount = 0;
+    uint32_t brsCount = 0;
     uint64_t lastUtcUs = 0;
     uint32_t lastMcuRelUs = 0;
     uint64_t lastQnxUtcUs = 0;
@@ -145,8 +154,8 @@ int main(int argc, char *argv[])
                     formatUtcUs(lastQnxUtcUs, qnxStr, sizeof(qnxStr));
                     auto now = std::chrono::steady_clock::now();
                     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastReport).count();
-                    printf("[%lldms] total=%u seq_gap=%u crc_err=%u sync_err=%u | seq=%u mcu_rel=%u us qnx=%s\n",
-                           elapsed, pktCount, seqGapCount, crcErrCount, syncErrCount,
+                    printf("[%lldms] total=%u fd=%u brs=%u seq_gap=%u crc_err=%u sync_err=%u | seq=%u mcu_rel=%u us qnx=%s\n",
+                           (long long)elapsed, pktCount, fdCount, brsCount, seqGapCount, crcErrCount, syncErrCount,
                            lastSeq, lastMcuRelUs, qnxStr);
                     lastReport = now;
                     lastPrintedCount = pktCount;
@@ -218,7 +227,12 @@ int main(int argc, char *argv[])
                               | ((uint64_t)p[24] << 56);
             uint32_t canId = ((uint32_t)p[25] << 24) | ((uint32_t)p[26] << 16)
                            | ((uint32_t)p[27] << 8) | p[28];
-            uint8_t dlc = p[29];
+            uint8_t dlcByte = p[29];
+            uint8_t dlc = dlcByte & DLC_MASK;
+            (void)canId;
+            (void)dlc;
+            if (dlcByte & DLC_FLAG_FD) fdCount++;
+            if (dlcByte & DLC_FLAG_BRS) brsCount++;
 
             lastUtcUs = utcUs;
             lastMcuRelUs = mcuRelUs;
@@ -232,8 +246,8 @@ int main(int argc, char *argv[])
         if (elapsed >= 1000 && pktCount > lastPrintedCount) {
             char qnxStr[64];
             formatUtcUs(lastQnxUtcUs, qnxStr, sizeof(qnxStr));
-            printf("[%lldms] total=%u seq_gap=%u crc_err=%u sync_err=%u | seq=%u mcu_rel=%u us qnx=%s\n",
-                   elapsed, pktCount, seqGapCount, crcErrCount, syncErrCount,
+            printf("[%lldms] total=%u fd=%u brs=%u seq_gap=%u crc_err=%u sync_err=%u | seq=%u mcu_rel=%u us qnx=%s\n",
+                   (long long)elapsed, pktCount, fdCount, brsCount, seqGapCount, crcErrCount, syncErrCount,
                    lastSeq, lastMcuRelUs, qnxStr);
             lastReport = now;
             lastPrintedCount = pktCount;
@@ -242,6 +256,7 @@ int main(int argc, char *argv[])
 
     printf("\n=== Final ===\n");
     printf("Total received: %u\n", pktCount);
+    printf("CAN-FD frames: %u (BRS: %u)\n", fdCount, brsCount);
     printf("Seq gaps: %u\n", seqGapCount);
     printf("CRC errors: %u\n", crcErrCount);
     printf("Sync errors: %u\n", syncErrCount);

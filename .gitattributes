@@ -1,0 +1,7 @@
+# Scripts run on the Linux board must keep LF line endings, even when the
+# repository is checked out on Windows (build.bat copies them unchanged).
+*.sh           text eol=lf
+deploy/*       text eol=lf
+*.go           text eol=lf
+*.bat          text eol=crlf
+canlog/testdata/*.blf binary

@@ -28,9 +28,13 @@ type LogLine struct {
 	Data string `json:"data"`
 }
 
+// maxLineLen bounds a single line so a device that never sends '\n' cannot
+// grow the line buffer without limit.
+const maxLineLen = 4096
+
 type Reader struct {
 	mu       sync.RWMutex
-	file     *os.File
+	fd       int
 	config   Config
 	lines    []LogLine
 	maxLines int
@@ -44,23 +48,25 @@ type Reader struct {
 
 func NewReader() *Reader {
 	return &Reader{
+		fd:          -1,
 		maxLines:    10000,
 		lines:       make([]LogLine, 0, 1000),
 		subscribers: make(map[int]chan LogLine),
 	}
 }
 
+var portPatterns = []string{
+	"/dev/ttyS*",
+	"/dev/ttyFIQ*",
+	"/dev/ttyUSB*",
+	"/dev/ttyACM*",
+	"/dev/ttyAMA*",
+}
+
 func ListPorts() []string {
-	var ports []string
+	ports := []string{}
 
-	patterns := []string{
-		"/dev/ttyS*",
-		"/dev/ttyUSB*",
-		"/dev/ttyACM*",
-		"/dev/ttyAMA*",
-	}
-
-	for _, pattern := range patterns {
+	for _, pattern := range portPatterns {
 		matches, _ := filepath.Glob(pattern)
 		for _, m := range matches {
 			if _, err := os.Stat(m); err == nil {
@@ -92,27 +98,69 @@ func (r *Reader) Open(cfg Config) error {
 		cfg.BaudRate = 115200
 	}
 
-	f, err := os.OpenFile(cfg.Port, os.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK, 0)
+	if !isAllowedPort(cfg.Port) {
+		return fmt.Errorf("invalid serial port: %q", cfg.Port)
+	}
+
+	// Raw fd in non-blocking mode; readLoop waits with poll(2). The fd is
+	// owned (and closed) by readLoop.
+	fd, err := unix.Open(cfg.Port, unix.O_RDWR|unix.O_NOCTTY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", cfg.Port, err)
 	}
 
-	fd := int(f.Fd())
 	if err := configurePort(fd, cfg); err != nil {
-		f.Close()
+		unix.Close(fd)
 		return err
 	}
 
-	// Keep O_NONBLOCK so readLoop can poll without blocking forever
-	r.file = f
+	r.fd = fd
 	r.config = cfg
 	r.running = true
 	r.lines = r.lines[:0]
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
-	go r.readLoop(ctx)
+	go r.readLoop(ctx, fd)
 
+	return nil
+}
+
+// isAllowedPort accepts only the device paths ListPorts can return.
+func isAllowedPort(port string) bool {
+	for _, pattern := range portPatterns {
+		if ok, _ := filepath.Match(pattern, port); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Write sends data to the open port.
+func (r *Reader) Write(data []byte) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if !r.running || r.fd < 0 {
+		return fmt.Errorf("port not open")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(data) > 0 {
+		n, err := unix.Write(r.fd, data)
+		if err == unix.EAGAIN || err == unix.EINTR {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("write timeout")
+			}
+			pfd := []unix.PollFd{{Fd: int32(r.fd), Events: unix.POLLOUT}}
+			unix.Poll(pfd, 100)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("write: %w", err)
+		}
+		data = data[n:]
+	}
 	return nil
 }
 
@@ -126,11 +174,10 @@ func (r *Reader) Close() error {
 	r.running = false
 	if r.cancel != nil {
 		r.cancel()
+		r.cancel = nil
 	}
-	if r.file != nil {
-		r.file.Close()
-		r.file = nil
-	}
+	// readLoop closes the fd once it observes the cancellation
+	r.fd = -1
 	return nil
 }
 
@@ -182,41 +229,81 @@ func (r *Reader) Unsubscribe(id int) {
 	}
 }
 
-func (r *Reader) readLoop(ctx context.Context) {
-	fd := int(r.file.Fd())
+func (r *Reader) readLoop(ctx context.Context, fd int) {
+	defer unix.Close(fd)
+
 	buf := make([]byte, 4096)
 	var lineBuf strings.Builder
+	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
 
-		n, err := unix.Read(fd, buf)
+		pfd[0].Revents = 0
+		n, err := unix.Poll(pfd, 100)
 		if err != nil {
-			if err == unix.EAGAIN || err == unix.EWOULDBLOCK {
-				time.Sleep(50 * time.Millisecond)
+			if err == unix.EINTR {
 				continue
 			}
-			// EBADF or other error after close
+			r.readFailed(ctx, err)
 			return
 		}
 		if n == 0 {
-			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if pfd[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 && pfd[0].Revents&unix.POLLIN == 0 {
+			r.readFailed(ctx, fmt.Errorf("device disconnected"))
+			return
+		}
+
+		n, err = unix.Read(fd, buf)
+		if err != nil {
+			if err == unix.EAGAIN || err == unix.EINTR {
+				continue
+			}
+			r.readFailed(ctx, err)
+			return
+		}
+		if n == 0 {
 			continue
 		}
 
 		// Split incoming bytes into lines
 		for i := 0; i < n; i++ {
 			b := buf[i]
-			if b == '\n' {
+			switch {
+			case b == '\n':
 				r.emitLine(lineBuf.String())
 				lineBuf.Reset()
-			} else if b != '\r' {
+			case b == '\r':
+			default:
 				lineBuf.WriteByte(b)
+				if lineBuf.Len() >= maxLineLen {
+					r.emitLine(lineBuf.String())
+					lineBuf.Reset()
+				}
 			}
+		}
+	}
+}
+
+// readFailed marks the port closed after an unrecoverable read error (for
+// example a USB adapter being unplugged).
+func (r *Reader) readFailed(ctx context.Context, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	r.emitLine(fmt.Sprintf("[serial error: %v, port closed]", err))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ctx.Err() == nil {
+		r.running = false
+		r.fd = -1
+		if r.cancel != nil {
+			r.cancel()
+			r.cancel = nil
 		}
 	}
 }
@@ -289,14 +376,20 @@ func configurePort(fd int, cfg Config) error {
 
 	termios.Cflag |= unix.CLOCAL | unix.CREAD
 
-	// Baud rate
-	speed := baudToSpeed(cfg.BaudRate)
+	// Baud rate. TCSETS takes the speed from the CBAUD bits of c_cflag;
+	// c_ispeed/c_ospeed are only honoured by TCSETS2.
+	speed, ok := baudToSpeed(cfg.BaudRate)
+	if !ok {
+		return fmt.Errorf("unsupported baud rate: %d", cfg.BaudRate)
+	}
+	termios.Cflag &^= unix.CBAUD | unix.CBAUDEX
+	termios.Cflag |= speed
 	termios.Ispeed = speed
 	termios.Ospeed = speed
 
-	// VMIN=1, VTIME=1 (100ms timeout)
-	termios.Cc[unix.VMIN] = 1
-	termios.Cc[unix.VTIME] = 1
+	// Non-blocking reads driven by poll(2)
+	termios.Cc[unix.VMIN] = 0
+	termios.Cc[unix.VTIME] = 0
 
 	if _, _, errno := unix.Syscall6(unix.SYS_IOCTL, uintptr(fd),
 		uintptr(unix.TCSETS), uintptr(unsafe.Pointer(&termios)), 0, 0, 0); errno != 0 {
@@ -306,35 +399,30 @@ func configurePort(fd int, cfg Config) error {
 	return nil
 }
 
-func baudToSpeed(baud int) uint32 {
-	switch baud {
-	case 9600:
-		return unix.B9600
-	case 19200:
-		return unix.B19200
-	case 38400:
-		return unix.B38400
-	case 57600:
-		return unix.B57600
-	case 115200:
-		return unix.B115200
-	case 230400:
-		return unix.B230400
-	case 460800:
-		return unix.B460800
-	case 500000:
-		return unix.B500000
-	case 576000:
-		return unix.B576000
-	case 921600:
-		return unix.B921600
-	case 1000000:
-		return unix.B1000000
-	case 1500000:
-		return unix.B1500000
-	case 2000000:
-		return unix.B2000000
-	default:
-		return unix.B115200
-	}
+var baudRates = map[int]uint32{
+	1200:    unix.B1200,
+	2400:    unix.B2400,
+	4800:    unix.B4800,
+	9600:    unix.B9600,
+	19200:   unix.B19200,
+	38400:   unix.B38400,
+	57600:   unix.B57600,
+	115200:  unix.B115200,
+	230400:  unix.B230400,
+	460800:  unix.B460800,
+	500000:  unix.B500000,
+	576000:  unix.B576000,
+	921600:  unix.B921600,
+	1000000: unix.B1000000,
+	1152000: unix.B1152000,
+	1500000: unix.B1500000,
+	2000000: unix.B2000000,
+	2500000: unix.B2500000,
+	3000000: unix.B3000000,
+	4000000: unix.B4000000,
+}
+
+func baudToSpeed(baud int) (uint32, bool) {
+	speed, ok := baudRates[baud]
+	return speed, ok
 }

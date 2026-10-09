@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 type FileInfo struct {
@@ -31,6 +30,9 @@ func NewManager(root string) *Manager {
 	if root == "" {
 		root = "/userdata"
 	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
 	os.MkdirAll(root, 0755)
 	return &Manager{
 		Root:    root,
@@ -38,21 +40,25 @@ func NewManager(root string) *Manager {
 	}
 }
 
+// sanitize maps a client path (relative to Root, "/" = Root) to an absolute
+// path that is guaranteed to be inside Root.
 func (m *Manager) sanitize(path string) (string, error) {
-	clean := filepath.Clean(path)
-	if clean == "" || clean == "." {
-		clean = "/"
-	}
-	full := filepath.Join(m.Root, clean)
-	abs, err := filepath.Abs(full)
-	if err != nil {
-		return "", err
-	}
-	rootAbs, _ := filepath.Abs(m.Root)
-	if !strings.HasPrefix(abs, rootAbs) {
+	// Cleaning as an absolute path resolves every ".." against "/", so the
+	// result can never climb above Root.
+	clean := filepath.Clean("/" + path)
+	abs := filepath.Join(m.Root, clean)
+	if abs != m.Root && !strings.HasPrefix(abs, m.Root+string(filepath.Separator)) {
 		return "", fmt.Errorf("path traversal denied")
 	}
 	return abs, nil
+}
+
+// validName checks a single path element supplied by the client.
+func validName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return fmt.Errorf("invalid file name: %q", name)
+	}
+	return nil
 }
 
 func (m *Manager) List(path string) ([]FileInfo, error) {
@@ -103,22 +109,44 @@ func (m *Manager) Upload(path string, file multipart.File, header *multipart.Fil
 		return err
 	}
 
-	os.MkdirAll(dir, 0755)
-	dst := filepath.Join(dir, header.Filename)
+	// Browsers may send a full client path; keep only the base name
+	name := filepath.Base(strings.ReplaceAll(header.Filename, "\\", "/"))
+	if err := validName(name); err != nil {
+		return err
+	}
 
-	out, err := os.Create(dst)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create directory: %w", err)
+	}
+	dst := filepath.Join(dir, name)
+
+	// Write to a temp file and rename, so a failed upload never leaves a
+	// truncated file in place of an existing one.
+	tmp, err := os.CreateTemp(dir, "."+name+".upload-*")
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer out.Close()
+	tmpName := tmp.Name()
 
-	written, err := io.Copy(out, file)
-	if err != nil {
-		os.Remove(dst)
-		return fmt.Errorf("write file: %w", err)
+	written, err := io.Copy(tmp, io.LimitReader(file, m.MaxSize+1))
+	if err == nil && written > m.MaxSize {
+		err = fmt.Errorf("file too large (max %d bytes)", m.MaxSize)
 	}
-	if written != header.Size {
-		// Not fatal, just a mismatch in reported size
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmpName, 0644)
+	}
+	if err == nil {
+		err = os.Rename(tmpName, dst)
+	}
+	if err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("write file: %w", err)
 	}
 
 	return nil
@@ -152,9 +180,11 @@ func (m *Manager) Delete(path string) error {
 		return err
 	}
 
-	rootAbs, _ := filepath.Abs(m.Root)
-	if full == rootAbs {
+	if full == m.Root {
 		return fmt.Errorf("cannot delete root directory")
+	}
+	if _, err := os.Lstat(full); err != nil {
+		return err
 	}
 
 	return os.RemoveAll(full)
@@ -177,38 +207,14 @@ func (m *Manager) Rename(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(oldFull, newFull)
-}
-
-func (m *Manager) GetDiskUsage() (total, used, free uint64) {
-	// This is a simplified version. Full implementation would use syscall.Statfs
-	var stat [5]uint64 // placeholder
-	_ = stat
-	return 0, 0, 0
-}
-
-type DiskInfo struct {
-	Total     uint64  `json:"total"`
-	Used      uint64  `json:"used"`
-	Free      uint64  `json:"free"`
-	UsagePct  float64 `json:"usagePct"`
-	MountPath string  `json:"mountPath"`
-}
-
-func (m *Manager) DiskUsage() DiskInfo {
-	// Use Statfs syscall
-	info := DiskInfo{MountPath: m.Root}
-
-	f, err := os.Open(m.Root)
-	if err != nil {
-		return info
+	if oldFull == m.Root || newFull == m.Root {
+		return fmt.Errorf("cannot rename root directory")
 	}
-	f.Close()
-
-	// Read from df command as fallback
-	return info
-}
-
-func FormatTime(t time.Time) string {
-	return t.Format("2006-01-02 15:04:05")
+	if err := validName(filepath.Base(newFull)); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(newFull); err == nil {
+		return fmt.Errorf("target already exists")
+	}
+	return os.Rename(oldFull, newFull)
 }

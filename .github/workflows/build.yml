@@ -1,0 +1,93 @@
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  go:
+    name: Go (test, packages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Format, vet and test
+        run: make test
+
+      - name: Build packages
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then VERSION="${GITHUB_REF_NAME}"; else VERSION="$(git describe --tags --always 2>/dev/null || echo dev)-${GITHUB_SHA::7}"; fi
+          make package VERSION="$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rkcan
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  receiver:
+    name: UdpCanFdReceiver (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S UdpCanFdReceiver -B UdpCanFdReceiver/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build UdpCanFdReceiver/build --config Release
+
+      - name: Collect binaries
+        shell: bash
+        run: |
+          mkdir -p dist
+          find UdpCanFdReceiver/build -type f \( -name 'udp_canfd_*' -perm -u+x -o -name 'udp_canfd_*.exe' \) \
+            -not -path '*/CMakeFiles/*' -exec cp {} dist/ \;
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: udp-canfd-receiver-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [go, receiver]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package receiver binaries
+        run: |
+          mkdir -p release
+          cp artifacts/rkcan/*.tar.gz release/
+          cd artifacts
+          for d in udp-canfd-receiver-*; do
+            (cd "$d" && zip -q "../../release/$d.zip" *)
+          done
+          ls -l ../release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*

@@ -24,7 +24,7 @@
         var html = '<span title="' + pct + '%">';
         for (var i = 1; i <= 4; i++) {
             var h = 4 + i * 4;
-            var barColor = i <= filled ? color : '#475569';
+            var barColor = i <= filled ? color : '#3c3c3c';
             html += '<span style="display:inline-block;width:3px;height:' + h +
                 'px;background:' + barColor + ';margin-right:1px;vertical-align:bottom;border-radius:1px;"></span>';
         }
@@ -45,6 +45,10 @@
 
             var btn = document.getElementById('wifi-disconnect-btn');
             if (btn) btn.disabled = !data.connected;
+
+            var be = { nmcli: 'NetworkManager', wpa_cli: 'wpa_supplicant' }[data.backend];
+            setText('wifi-backend', be ? ('接口 ' + (data.iface || 'wlan0') + ' · 由 ' + be + ' 管理')
+                : '未检测到 NetworkManager 或 wpa_supplicant，无法连接网络（仅可扫描）');
         }).catch(function () {});
     }
 
@@ -55,7 +59,11 @@
         window.api('/api/wifi/scan').then(function (data) {
             var networks = Array.isArray(data) ? data : (data && data.networks) || [];
             renderScanResults(networks);
-        }).catch(function () {}).finally(function () {
+        }).catch(function (err) {
+            var tbody = document.getElementById('wifi-scan-tbody');
+            if (tbody) tbody.innerHTML = '<tr><td colspan="5" class="text-muted center">扫描失败: ' +
+                window.escapeHtml(err && err.message || '') + '</td></tr>';
+        }).finally(function () {
             if (scanBtn) scanBtn.disabled = false;
         });
     }
@@ -65,7 +73,7 @@
         if (!tbody) return;
 
         if (networks.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#64748b;">No networks found</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#8b8b8b;">No networks found</td></tr>';
             return;
         }
 
@@ -94,16 +102,62 @@
         });
     }
 
-    function openConnectModal(ssid) {
+    function openConnectModal(ssid, manual) {
         var modal = document.getElementById('wifi-connect-modal');
         var ssidInput = document.getElementById('wifi-connect-ssid');
         var passInput = document.getElementById('wifi-connect-password');
         if (!modal) return;
 
-        if (ssidInput) ssidInput.value = ssid;
+        if (ssidInput) {
+            ssidInput.value = ssid;
+            ssidInput.readOnly = !manual;
+        }
         if (passInput) passInput.value = '';
+        document.getElementById('wifi-connect-hidden-row').style.display = manual ? '' : 'none';
+        document.getElementById('wifi-connect-hidden').checked = !!manual;
+        setConnecting(false);
         modal.classList.add('active');
-        if (passInput) passInput.focus();
+        if (manual && ssidInput) ssidInput.focus();
+        else if (passInput) passInput.focus();
+    }
+
+    function setConnecting(on) {
+        document.getElementById('wifi-connect-progress').style.display = on ? '' : 'none';
+        document.getElementById('wifi-connect-submit').disabled = on;
+    }
+
+    function loadSaved() {
+        fetch('/api/wifi/saved').then(function (r) { return r.ok ? r.json() : []; }).then(function (nets) {
+            var tb = document.getElementById('wifi-saved-body');
+            if (!tb) return;
+            if (!nets || !nets.length) {
+                tb.innerHTML = '<tr><td class="text-muted center">没有已保存的网络</td></tr>';
+                return;
+            }
+            tb.innerHTML = nets.map(function (n) {
+                var id = window.escapeHtml(n.id);
+                return '<tr><td>' + window.escapeHtml(n.ssid) + (n.current ? ' <span style="color:#22c55e">● 当前</span>' : '') +
+                    '</td><td style="text-align:right;white-space:nowrap">' +
+                    (n.current ? '' : '<button class="btn btn-sm btn-primary" data-saved-connect="' + id + '">连接</button> ') +
+                    '<button class="btn btn-sm btn-danger" data-saved-forget="' + id + '">删除</button></td></tr>';
+            }).join('');
+        }).catch(function () {});
+    }
+
+    function onSavedClick(e) {
+        var cid = e.target.getAttribute('data-saved-connect');
+        var fid = e.target.getAttribute('data-saved-forget');
+        if (cid) {
+            e.target.disabled = true;
+            window.showToast('正在连接…', 'info');
+            window.api('/api/wifi/saved/connect', { method: 'POST', body: JSON.stringify({ id: cid }) })
+                .then(function () { window.showToast('已连接', 'success'); loadStatus(); loadSaved(); })
+                .catch(function () { e.target.disabled = false; });
+        } else if (fid) {
+            if (!confirm('删除这个已保存的网络？')) return;
+            window.api('/api/wifi/saved/forget', { method: 'POST', body: JSON.stringify({ id: fid }) })
+                .then(function () { loadSaved(); loadStatus(); }).catch(function () {});
+        }
     }
 
     function closeConnectModal() {
@@ -120,14 +174,19 @@
             return;
         }
 
+        var hidden = document.getElementById('wifi-connect-hidden').checked;
+        setConnecting(true);
         window.api('/api/wifi/connect', {
             method: 'POST',
-            body: JSON.stringify({ ssid: ssid, password: password }),
+            body: JSON.stringify({ ssid: ssid, password: password, hidden: hidden }),
         }).then(function () {
-            window.showToast('Connecting to ' + ssid + '...', 'info');
+            window.showToast('已连接到 ' + ssid, 'success');
             closeConnectModal();
-            setTimeout(loadStatus, 3000);
-        }).catch(function () {});
+            loadStatus();
+            loadSaved();
+        }).catch(function () {
+            setConnecting(false);
+        });
     }
 
     function disconnect() {
@@ -159,6 +218,10 @@
         var disconnectBtn = document.getElementById('wifi-disconnect-btn');
         if (disconnectBtn) disconnectBtn.addEventListener('click', disconnect);
 
+        document.getElementById('wifi-hidden-btn').addEventListener('click', function () { openConnectModal('', true); });
+        document.getElementById('wifi-saved-refresh').addEventListener('click', loadSaved);
+        document.getElementById('wifi-saved-body').addEventListener('click', onSavedClick);
+
         var modalClose = document.getElementById('wifi-modal-close');
         if (modalClose) modalClose.addEventListener('click', closeConnectModal);
 
@@ -188,6 +251,7 @@
             initialized = true;
         }
         loadStatus();
+        loadSaved();
         scanNetworks();
         startStatusPolling();
     };

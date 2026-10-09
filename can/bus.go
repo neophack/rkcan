@@ -6,194 +6,191 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+const (
+	defaultSendQueueSize = 10000
+	defaultRecvQueueSize = 200000
+	defaultSendInterval  = 500 * time.Microsecond
+	healthCheckInterval  = 1 * time.Second
+	maxSendFailures      = 3
+)
+
+// Options configures a Bus.
+type Options struct {
+	// TxOnly installs an empty receive filter so the socket never queues
+	// received frames. Use it for sockets that only transmit.
+	TxOnly bool
+	// SendQueueSize and RecvQueueSize override the default channel sizes.
+	SendQueueSize int
+	RecvQueueSize int
 }
 
-// Bus represents a CAN-FD bus interface
+// Bus represents a SocketCAN raw socket bound to one interface. It supports
+// both CAN-FD (MTU 72) and classic CAN (MTU 16) interfaces; CAN-FD frames,
+// including frames with BRS, can only be sent on a CAN-FD interface.
 type Bus struct {
-	file                    *os.File
-	fd                      int
-	ifaceName               string
-	sendQueue               chan *Message
-	stopSend                chan interface{}
-	recvQueue               chan *Message
-	running                 bool
-	ctx                     context.Context
-	cancel                  context.CancelFunc
-	shutdownOnce            sync.Once
+	file      *os.File
+	fd        int
+	ifaceName string
+	fdMode    bool // interface MTU is CANFD_MTU
+
+	sendQueue chan *Message
+	recvQueue chan *Message
+
+	running      atomic.Bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	shutdownOnce sync.Once
+
+	minSendInterval atomic.Int64 // nanoseconds
+
+	// Only touched by sendLoop.
 	lastSendTime            time.Time
 	lastHealthCheck         time.Time
-	minSendInterval         time.Duration
-	healthCheckInterval     time.Duration
 	consecutiveSendFailures int
 }
 
-// NewBus creates a new CAN-FD bus instance for the specified interface
-func NewBus(ifaceName string) (bus *Bus, err error) {
-	// Find interface
+// NewBus creates a new bus instance for the specified interface.
+func NewBus(ifaceName string) (*Bus, error) {
+	return NewBusWithOptions(ifaceName, Options{})
+}
+
+// NewBusWithOptions creates a new bus instance with the given options.
+func NewBusWithOptions(ifaceName string, opts Options) (bus *Bus, err error) {
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
-		err = fmt.Errorf("interface %s: %w", ifaceName, err)
-		return
+		return nil, fmt.Errorf("interface %s: %w", ifaceName, err)
 	}
 
-	// Check if network is up. Can technically still be a race
-	// condition after this, but we're just using it for stability
-	// purposes in the k8s environment.
 	if (iface.Flags & net.FlagUp) == 0 {
-		err = fmt.Errorf("interface %s is down", ifaceName)
-		return
+		return nil, fmt.Errorf("interface %s is down", ifaceName)
 	}
 
-	// Check if CAN-FD MTU is set
-	if iface.MTU != CANFD_MTU {
-		err = fmt.Errorf(
-			"Expected CAN-FD MTU (%d), got: %d",
-			CANFD_MTU, iface.MTU,
-		)
-		return
+	var fdMode bool
+	switch iface.MTU {
+	case CANFD_MTU:
+		fdMode = true
+	case CAN_MTU:
+		fdMode = false
+	default:
+		return nil, fmt.Errorf("interface %s: unexpected MTU %d (want %d for CAN-FD or %d for CAN)",
+			ifaceName, iface.MTU, CANFD_MTU, CAN_MTU)
 	}
 
-	// Open CAN socket fd
-	fd, err := unix.Socket(
-		unix.AF_CAN,
-		unix.SOCK_RAW,
-		unix.CAN_RAW,
-	)
+	fd, err := unix.Socket(unix.AF_CAN, unix.SOCK_RAW, unix.CAN_RAW)
 	if err != nil {
-		err = fmt.Errorf("socket: %w", err)
-		return
+		return nil, fmt.Errorf("socket: %w", err)
+	}
+	closeOnErr := func(e error) (*Bus, error) {
+		unix.Close(fd)
+		return nil, e
 	}
 
 	// Put fd in non-blocking mode, so the created file will be
 	// registered by the runtime poller
-	// More info: https://morsmachine.dk/netpoller
-	if err = unix.SetNonblock(fd, true); err != nil {
-		err = fmt.Errorf("set nonblock: %w", err)
-		unix.Close(fd)
-		return
+	if err := unix.SetNonblock(fd, true); err != nil {
+		return closeOnErr(fmt.Errorf("set nonblock: %w", err))
 	}
 
-	// Enable CAN-FD frames
-	err = syscall.SetsockoptInt(
-		fd,
-		unix.SOL_CAN_RAW,
-		unix.CAN_RAW_FD_FRAMES,
-		1,
-	)
-	if err != nil {
-		err = fmt.Errorf("setsockopt CAN_RAW_FD_FRAMES: %w", err)
-		unix.Close(fd)
-		return
+	// Enable CAN-FD frames. Harmless on classic interfaces, where the kernel
+	// simply never delivers CAN-FD frames.
+	if err := unix.SetsockoptInt(fd, unix.SOL_CAN_RAW, unix.CAN_RAW_FD_FRAMES, 1); err != nil {
+		return closeOnErr(fmt.Errorf("setsockopt CAN_RAW_FD_FRAMES: %w", err))
 	}
 
-	// Disable error frames to avoid conflicts
-	err = syscall.SetsockoptInt(
-		fd,
-		unix.SOL_CAN_RAW,
-		unix.CAN_RAW_ERR_FILTER,
-		0,
-	)
-	if err != nil {
-		err = fmt.Errorf("setsockopt CAN_RAW_ERR_FILTER: %w", err)
-		unix.Close(fd)
-		return
+	// Disable error frames
+	if err := unix.SetsockoptInt(fd, unix.SOL_CAN_RAW, unix.CAN_RAW_ERR_FILTER, 0); err != nil {
+		return closeOnErr(fmt.Errorf("setsockopt CAN_RAW_ERR_FILTER: %w", err))
 	}
 
-	// Increase socket receive buffer to prevent kernel-level frame loss
-	// under high bus load. Default (~208KB) is too small for burst traffic.
-	rcvBufSize := 4 * 1024 * 1024 // 4 MB
-	if err = syscall.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, rcvBufSize); err != nil {
-		log.Printf("Warning: failed to set CAN socket SO_RCVBUF to %d: %v", rcvBufSize, err)
+	if opts.TxOnly {
+		// An empty filter list means "receive nothing"
+		if err := unix.SetsockoptCanRawFilter(fd, unix.SOL_CAN_RAW, unix.CAN_RAW_FILTER, []unix.CanFilter{}); err != nil {
+			return closeOnErr(fmt.Errorf("setsockopt CAN_RAW_FILTER: %w", err))
+		}
+	} else {
+		// Increase socket receive buffer to prevent kernel-level frame loss
+		// under high bus load. Default (~208KB) is too small for burst traffic.
+		rcvBufSize := 4 * 1024 * 1024
+		if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, rcvBufSize); err != nil {
+			log.Printf("Warning: failed to set CAN socket SO_RCVBUF to %d: %v", rcvBufSize, err)
+		}
 	}
 
-	// Bind socket to actual interface
-	err = unix.Bind(fd, &unix.SockaddrCAN{Ifindex: iface.Index})
-	if err != nil {
-		err = fmt.Errorf("bind: %w", err)
-		unix.Close(fd)
-		return
+	if err := unix.Bind(fd, &unix.SockaddrCAN{Ifindex: iface.Index}); err != nil {
+		return closeOnErr(fmt.Errorf("bind: %w", err))
+	}
+
+	sendQueueSize := opts.SendQueueSize
+	if sendQueueSize <= 0 {
+		sendQueueSize = defaultSendQueueSize
+	}
+	recvQueueSize := opts.RecvQueueSize
+	if recvQueueSize <= 0 {
+		recvQueueSize = defaultRecvQueueSize
+		if opts.TxOnly {
+			recvQueueSize = 1
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	file := os.NewFile(uintptr(fd), ifaceName)
 	bus = &Bus{
-		file:                file,
-		fd:                  fd,
-		ifaceName:           ifaceName,
-		sendQueue:           make(chan *Message, 10000),
-		stopSend:            make(chan interface{}),
-		running:             true,
-		recvQueue:           make(chan *Message, 200000),
-		ctx:                 ctx,
-		cancel:              cancel,
-		minSendInterval:     500 * time.Microsecond, // Minimum 500µs between sends
-		healthCheckInterval: 250 * time.Millisecond,
+		file:      os.NewFile(uintptr(fd), ifaceName),
+		fd:        fd,
+		ifaceName: ifaceName,
+		fdMode:    fdMode,
+		sendQueue: make(chan *Message, sendQueueSize),
+		recvQueue: make(chan *Message, recvQueueSize),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
+	bus.running.Store(true)
+	bus.minSendInterval.Store(int64(defaultSendInterval))
 
-	// Start receiving and sending loops
 	go bus.recvLoop(ctx)
 	go bus.sendLoop(ctx)
 
-	return
+	return bus, nil
 }
 
-// Shutdown gracefully shuts down the CAN bus
+// Shutdown gracefully shuts down the bus. It is safe to call more than once
+// and from any goroutine. RecvQueue is closed once the receive loop exits.
 func (b *Bus) Shutdown() {
 	b.shutdownOnce.Do(func() {
+		b.running.Store(false)
 		b.cancel()
-		b.running = false
-		if b.file != nil {
-			// Shut down the socket first to unblock any pending Read/Write
-			unix.Shutdown(b.fd, unix.SHUT_RDWR)
-			b.file.Close()
-		}
-		// Close recvQueue so consumers can exit cleanly
-		close(b.recvQueue)
+		// Shut down the socket first to unblock any pending Read/Write
+		unix.Shutdown(b.fd, unix.SHUT_RDWR)
+		b.file.Close()
 	})
 }
 
+// Done returns a channel that is closed when the bus shuts down.
+func (b *Bus) Done() <-chan struct{} {
+	return b.ctx.Done()
+}
+
 // ResetFilters resets CAN filters to allow all messages
-func (b *Bus) ResetFilters() (err error) {
-	allow_all := unix.CanFilter{
-		Id:   0,
-		Mask: 0,
-	}
-	err = b.SetFilters(&[]unix.CanFilter{allow_all})
-	return
+func (b *Bus) ResetFilters() error {
+	return b.SetFilters(&[]unix.CanFilter{{Id: 0, Mask: 0}})
 }
 
 // SetFilters sets CAN ID filters for message reception
-func (b *Bus) SetFilters(filters *[]unix.CanFilter) (err error) {
-	// Set CAN filters
-	err = unix.SetsockoptCanRawFilter(
-		b.fd,
-		unix.SOL_CAN_RAW,
-		unix.CAN_RAW_FILTER,
-		*filters,
-	)
-	if err != nil {
-		err = fmt.Errorf("setsockopt CAN_RAW_FILTER: %w", err)
-		return
+func (b *Bus) SetFilters(filters *[]unix.CanFilter) error {
+	if err := unix.SetsockoptCanRawFilter(b.fd, unix.SOL_CAN_RAW, unix.CAN_RAW_FILTER, *filters); err != nil {
+		return fmt.Errorf("setsockopt CAN_RAW_FILTER: %w", err)
 	}
-
-	return
+	return nil
 }
 
 // SendQueue returns the channel for sending messages
@@ -201,15 +198,34 @@ func (b *Bus) SendQueue() chan<- *Message {
 	return b.sendQueue
 }
 
-// RecvQueue returns the channel for receiving messages
+// RecvQueue returns the channel for receiving messages. It is closed when
+// the bus shuts down.
 func (b *Bus) RecvQueue() <-chan *Message {
 	return b.recvQueue
 }
 
-// Send sends a CAN message synchronously
-func (b *Bus) Send(msg *Message) error {
-	if !b.running {
+// IsFD reports whether the interface is configured for CAN-FD (MTU 72).
+func (b *Bus) IsFD() bool {
+	return b.fdMode
+}
+
+func (b *Bus) checkSendable(msg *Message) error {
+	if msg == nil {
+		return fmt.Errorf("nil message")
+	}
+	if !b.running.Load() {
 		return fmt.Errorf("bus is not running")
+	}
+	if msg.FD && !b.fdMode {
+		return fmt.Errorf("interface %s is not in CAN-FD mode (fd on), cannot send CAN-FD frame", b.ifaceName)
+	}
+	return nil
+}
+
+// Send queues a message, blocking while the send queue is full.
+func (b *Bus) Send(msg *Message) error {
+	if err := b.checkSendable(msg); err != nil {
+		return err
 	}
 
 	select {
@@ -220,10 +236,10 @@ func (b *Bus) Send(msg *Message) error {
 	}
 }
 
-// SendNonBlocking sends a CAN message without blocking
+// SendNonBlocking queues a message, failing if the send queue is full.
 func (b *Bus) SendNonBlocking(msg *Message) error {
-	if !b.running {
-		return fmt.Errorf("bus is not running")
+	if err := b.checkSendable(msg); err != nil {
+		return err
 	}
 
 	select {
@@ -234,62 +250,53 @@ func (b *Bus) SendNonBlocking(msg *Message) error {
 	}
 }
 
-// recvLoop handles receiving CAN-FD frames
+// recvLoop reads frames from the socket and owns closing recvQueue.
 func (b *Bus) recvLoop(ctx context.Context) {
+	defer close(b.recvQueue)
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("CAN receive loop panic recovered: %v", r)
+			log.Printf("CAN receive loop panic recovered on %s: %v", b.ifaceName, r)
+			b.Shutdown()
 		}
 	}()
 
 	var frame [CANFD_MTU]byte
 
-	for b.running {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
+	for {
 		n, err := b.file.Read(frame[:])
-
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			if errors.Is(err, os.ErrClosed) {
 				return
 			}
-			// Fatal errors (e.g. interface down) should terminate the recvLoop
-			// so that the caller can recreate the bus.
-			var errno syscall.Errno
-			if errors.As(err, &errno) {
-				if errno == syscall.ENETDOWN || errno == syscall.ENETRESET || errno == syscall.ECONNRESET {
-					log.Printf("CAN interface error on %s: %v — shutting down bus", b.GetInterfaceName(), err)
-					b.Shutdown()
-					return
-				}
-			}
-			switch err.(type) {
-			case *fs.PathError:
-				// File closed, normal shutdown
+			// Fatal errors (e.g. interface down) terminate the bus so that
+			// the owner can recreate it.
+			if errors.Is(err, syscall.ENETDOWN) || errors.Is(err, syscall.ENETRESET) ||
+				errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ENODEV) ||
+				errors.Is(err, syscall.EBADF) {
+				log.Printf("CAN interface error on %s: %v — shutting down bus", b.ifaceName, err)
+				b.Shutdown()
 				return
-			default:
-				log.Printf("CAN read error: %v", err)
-				continue
 			}
+			log.Printf("CAN read error on %s: %v", b.ifaceName, err)
+			// Avoid a busy loop on persistent errors
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
 		}
 
-		// If we stopped while waiting, quit
-		if !b.running {
-			return
-		}
-
-		// If we didn't receive anything, continue
-		if n == 0 {
+		if n != CAN_MTU && n != CANFD_MTU {
 			continue
 		}
 
 		msg := new(Message)
 		if err := msg.Unmarshal(frame[:n]); err != nil {
-			log.Printf("Invalid CAN Message: %v", err)
+			log.Printf("Invalid CAN frame on %s: %v", b.ifaceName, err)
 			continue
 		}
 
@@ -302,44 +309,40 @@ func (b *Bus) recvLoop(ctx context.Context) {
 	}
 }
 
-// sendLoop handles sending CAN-FD frames
+// sendLoop writes queued frames to the socket
 func (b *Bus) sendLoop(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("CAN send loop panic recovered: %v", r)
+			log.Printf("CAN send loop panic recovered on %s: %v", b.ifaceName, r)
+			b.Shutdown()
 		}
 	}()
 
-	for b.running {
+	var frame [CANFD_MTU]byte
+
+	for {
 		select {
 		case <-ctx.Done():
-			// Drain the send queue on shutdown
-			for {
-				select {
-				case <-b.sendQueue:
-					// Discard remaining messages
-				default:
-					return
-				}
-			}
+			return
 		case msg := <-b.sendQueue:
 			if msg == nil {
 				continue
 			}
 
-			var frame [CANFD_MTU]byte
-			err := msg.Marshal(&frame)
+			n, err := msg.Encode(&frame)
 			if err != nil {
-				log.Printf("Couldn't marshal CAN frame: %v", err)
+				log.Printf("Couldn't encode CAN frame on %s: %v", b.ifaceName, err)
 				continue
 			}
 
-			// For CAN-FD frames, always write the full CANFD_MTU (72 bytes)
-			// Linux SocketCAN expects the complete frame structure
-			err = b.writeFrameWithRetry(frame[:])
-			if err != nil {
+			// CAN-FD frames (incl. BRS) are written as the full CANFD_MTU
+			// (72 bytes), classic frames as CAN_MTU (16 bytes). SocketCAN
+			// selects the frame type from the write size.
+			if err := b.writeFrameWithRetry(ctx, frame[:n]); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				b.noteSendFailure("write error after retries", err)
-				// Don't panic, just log and continue
 				continue
 			}
 
@@ -353,46 +356,45 @@ func (b *Bus) sendLoop(ctx context.Context) {
 	}
 }
 
-// writeFrameWithRetry attempts to write a frame with rate limiting and exponential backoff retry logic
-func (b *Bus) writeFrameWithRetry(frame []byte) error {
-	// Rate limiting: ensure minimum interval between sends
-	now := time.Now()
+// writeFrameWithRetry writes a frame with rate limiting and exponential
+// backoff while the device TX queue is full.
+func (b *Bus) writeFrameWithRetry(ctx context.Context, frame []byte) error {
 	if !b.lastSendTime.IsZero() {
-		elapsed := now.Sub(b.lastSendTime)
-		if elapsed < b.minSendInterval {
-			time.Sleep(b.minSendInterval - elapsed)
+		interval := time.Duration(b.minSendInterval.Load())
+		if elapsed := time.Since(b.lastSendTime); elapsed < interval {
+			time.Sleep(interval - elapsed)
 		}
 	}
 
-	maxRetries := 3
-	baseDelay := 1 * time.Millisecond
+	// A full device TX queue is normal at high load (e.g. replay at max
+	// speed); keep retrying for up to txQueueFullTimeout before treating it
+	// as a failure (no ACK / bus problem).
+	const txQueueFullTimeout = 500 * time.Millisecond
+	deadline := time.Now().Add(txQueueFullTimeout)
+	delay := 100 * time.Microsecond
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for {
 		_, err := b.file.Write(frame)
 		if err == nil {
 			b.lastSendTime = time.Now()
 			return nil
 		}
-
-		// Check for specific buffer full errors
-		if attempt < maxRetries {
-			if isBufferFullError(err) {
-				// Exponential backoff: 1ms, 2ms, 4ms
-				delay := baseDelay * time.Duration(1<<attempt)
-				time.Sleep(delay)
-				continue
-			}
+		if !isBufferFullError(err) || time.Now().After(deadline) {
+			return err
 		}
-
-		// For other errors or final attempt, return immediately
-		return err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 5*time.Millisecond {
+			delay *= 2
+		}
 	}
-
-	return fmt.Errorf("max retries exceeded")
 }
 
 func (b *Bus) verifyInterfaceHealthy() error {
-	if time.Since(b.lastHealthCheck) < b.healthCheckInterval {
+	if time.Since(b.lastHealthCheck) < healthCheckInterval {
 		return nil
 	}
 	b.lastHealthCheck = time.Now()
@@ -410,7 +412,7 @@ func (b *Bus) verifyInterfaceHealthy() error {
 func (b *Bus) noteSendFailure(reason string, err error) {
 	b.consecutiveSendFailures++
 	log.Printf("CAN send failure on %s: %s: %v", b.ifaceName, reason, err)
-	if b.consecutiveSendFailures <= 3 {
+	if b.consecutiveSendFailures <= maxSendFailures {
 		return
 	}
 
@@ -420,42 +422,34 @@ func (b *Bus) noteSendFailure(reason string, err error) {
 		return
 	}
 
-	log.Printf("CAN interface restarted on %s after send failures", b.ifaceName)
 	b.consecutiveSendFailures = 0
 	b.lastHealthCheck = time.Time{}
 }
 
-// isBufferFullError checks if the error indicates buffer space issues
+// isBufferFullError reports whether err means the device TX queue is full
 func isBufferFullError(err error) bool {
-	// Check for common buffer full error messages
-	errStr := err.Error()
-	return errStr == "no buffer space available" ||
-		errStr == "resource temporarily unavailable" ||
-		errStr == "would block"
+	return errors.Is(err, syscall.ENOBUFS) || errors.Is(err, syscall.EAGAIN)
 }
 
 // SetMinSendInterval sets the minimum time interval between CAN frame transmissions
 func (b *Bus) SetMinSendInterval(interval time.Duration) {
-	b.minSendInterval = interval
+	if interval < 0 {
+		interval = 0
+	}
+	b.minSendInterval.Store(int64(interval))
 }
 
 // GetMinSendInterval returns the current minimum send interval
 func (b *Bus) GetMinSendInterval() time.Duration {
-	return b.minSendInterval
+	return time.Duration(b.minSendInterval.Load())
 }
 
 // IsRunning returns true if the bus is currently running
 func (b *Bus) IsRunning() bool {
-	return b.running
+	return b.running.Load()
 }
 
 // GetInterfaceName returns the name of the CAN interface
 func (b *Bus) GetInterfaceName() string {
-	if b.ifaceName != "" {
-		return b.ifaceName
-	}
-	if b.file != nil {
-		return b.file.Name()
-	}
-	return ""
+	return b.ifaceName
 }

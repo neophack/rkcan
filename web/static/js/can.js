@@ -96,6 +96,10 @@ window.updateCANStats = (data) => {
         else can1BusState.style.color = '';
     }
 
+    // -- BRS received frames --
+    if (data.can0RxBrs != null) setTxt('can0-rxbrs', formatNumber(data.can0RxBrs));
+    if (data.can1RxBrs != null) setTxt('can1-rxbrs', formatNumber(data.can1RxBrs));
+
     // -- CAN0 statistics table --
     setTxt('can0-tx-frames', data.can0TxFrames);
     setTxt('can0-rx-frames', data.can0RxFrames ?? data.can0Total);
@@ -147,26 +151,26 @@ const loadDiagnostics = async () => {
     }
 };
 
-const formatDiagnostics = (results, iface) => {
-    if (!results || !Array.isArray(results)) {
+const formatDiagnostics = (results) => {
+    if (!Array.isArray(results)) {
         return typeof results === 'object' ? JSON.stringify(results, null, 2) : String(results);
     }
 
-    const lines = [`=== Diagnostics: ${iface} ===`, ''];
-
-    for (const item of results) {
-        const icon = item.status === 'PASS' ? '[OK]' :
-                     item.status === 'WARN' ? '[!!]' : '[XX]';
-        lines.push(`${icon} ${item.name || item.check || 'check'}`);
-        if (item.detail) lines.push(`    ${item.detail}`);
+    const lines = [];
+    for (const res of results) {
+        lines.push(`=== Diagnostics: ${res.interface} (${res.timestamp || ''}) ===`, '');
+        for (const item of res.checks || []) {
+            const icon = item.status === 'PASS' ? '[OK]' : item.status === 'WARN' ? '[!!]' : '[XX]';
+            lines.push(`${icon} ${item.name}`);
+            if (item.detail) lines.push(`    ${item.detail}`);
+        }
+        const st = res.statistics;
+        if (st) {
+            lines.push('', `State: ${st.state || '-'}  RX: ${st.rxFrames}  TX: ${st.txFrames}  ` +
+                `RX err: ${st.rxErrors}  TX err: ${st.txErrors}  Bus err: ${st.busErrors}  Restarts: ${st.restarts}`);
+        }
+        lines.push('', `Overall: ${res.overall}`, '');
     }
-
-    // Overall status
-    const hasError = results.some(r => r.status === 'FAIL' || r.status === 'ERROR');
-    const hasWarn = results.some(r => r.status === 'WARN');
-    const overall = hasError ? 'ERROR' : hasWarn ? 'WARNING' : 'OK';
-    lines.push('', `Overall: ${overall}`);
-
     return lines.join('\n');
 };
 
@@ -271,11 +275,11 @@ const renderCANDetails = (info) => {
 /*  CAN Time Sync                                                              */
 /* ========================================================================== */
 
-const updateTimeSyncBadge = (enabled, iface, protocol) => {
+const updateTimeSyncBadge = (enabled, iface, protocol, brs) => {
     const badge = document.getElementById('timesync-status-badge');
     if (!badge) return;
     badge.className = 'card-header-badge ' + (enabled ? 'timesync-badge-running' : 'timesync-badge-stopped');
-    badge.textContent = enabled ? `运行中 (${iface} · 0x${protocol || '5A4'})` : '已停止';
+    badge.textContent = enabled ? `运行中 (${iface} · 0x${protocol || '5A4'}${brs ? ' · BRS' : ''})` : '已停止';
 };
 
 const loadTimeSyncStatus = async () => {
@@ -288,7 +292,9 @@ const loadTimeSyncStatus = async () => {
         const proto = data.protocol || '5A4';
         const radioEl = document.querySelector(`input[name="timesync-protocol"][value="${proto}"]`);
         if (radioEl) radioEl.checked = true;
-        updateTimeSyncBadge(data.enabled, data.iface, proto);
+        const brsEl = document.getElementById('timesync-brs-toggle');
+        if (brsEl) brsEl.checked = !!data.brs;
+        updateTimeSyncBadge(data.enabled, data.iface, proto, data.brs);
     } catch {
         // Non-critical, ignore
     }
@@ -298,15 +304,16 @@ const applyTimeSyncConfig = async () => {
     const enabled = document.getElementById('timesync-enable-toggle')?.checked ?? false;
     const iface = document.getElementById('timesync-iface')?.value || 'can0';
     const protocol = document.querySelector('input[name="timesync-protocol"]:checked')?.value || '5A4';
+    const brs = document.getElementById('timesync-brs-toggle')?.checked ?? false;
 
     try {
         const data = await window.api('/api/can/timesync', {
             method: 'POST',
-            body: JSON.stringify({ enabled, iface, protocol })
+            body: JSON.stringify({ enabled, iface, protocol, brs })
         });
-        updateTimeSyncBadge(data.enabled, data.iface, data.protocol);
+        updateTimeSyncBadge(data.enabled, data.iface, data.protocol, data.brs);
         const msg = data.enabled
-            ? `时间同步已在 ${data.iface} 上启动 (0x${data.protocol || '5A4'})`
+            ? `时间同步已在 ${data.iface} 上启动 (0x${data.protocol || '5A4'}${data.brs ? ', BRS' : ''})`
             : '时间同步已停止';
         window.showToast(msg, data.enabled ? 'success' : 'info');
     } catch {
@@ -389,6 +396,11 @@ const wireEvents = () => {
             }
         });
     }
+    document.getElementById('timesync-brs-toggle')?.addEventListener('change', () => {
+        if (document.getElementById('timesync-enable-toggle')?.checked) {
+            applyTimeSyncConfig();
+        }
+    });
     document.querySelectorAll('input[name="timesync-protocol"]').forEach((radio) => {
         radio.addEventListener('change', () => {
             if (document.getElementById('timesync-enable-toggle')?.checked) {

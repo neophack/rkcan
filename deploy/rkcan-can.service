@@ -1,0 +1,12 @@
+[Unit]
+Description=Configure CAN interfaces for RKCAN
+After=sys-subsystem-net-devices-can0.device
+Before=rkcan.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@BINDIR@/rkcan-can-setup @CONFDIR@/rkcan.conf
+
+[Install]
+WantedBy=multi-user.target

@@ -44,6 +44,9 @@ func NewCPUCollector() *CPUCollector {
 	c := &CPUCollector{}
 	c.stats.History = make([]float64, 0, historySize)
 	ticks := readCPUTicks()
+	if len(ticks) == 0 {
+		return c
+	}
 	c.prev = ticks[0]
 	if len(ticks) > 1 {
 		c.prevPer = ticks[1:]
@@ -63,11 +66,7 @@ func (c *CPUCollector) Collect() {
 	defer c.mu.Unlock()
 
 	cur := ticks[0]
-	dt := cur.total() - c.prev.total()
-	if dt > 0 {
-		db := cur.busy() - c.prev.busy()
-		c.stats.UsagePercent = float64(db) / float64(dt) * 100
-	}
+	c.stats.UsagePercent = usagePercent(c.prev, cur)
 	c.prev = cur
 
 	if len(ticks) > 1 {
@@ -79,11 +78,7 @@ func (c *CPUCollector) Collect() {
 		}
 		for i, ct := range cores {
 			if i < len(c.prevPer) {
-				dt := ct.total() - c.prevPer[i].total()
-				if dt > 0 {
-					db := ct.busy() - c.prevPer[i].busy()
-					c.stats.PerCore[i] = float64(db) / float64(dt) * 100
-				}
+				c.stats.PerCore[i] = usagePercent(c.prevPer[i], ct)
 			}
 		}
 		c.prevPer = cores
@@ -93,6 +88,15 @@ func (c *CPUCollector) Collect() {
 	if len(c.stats.History) > historySize {
 		c.stats.History = c.stats.History[len(c.stats.History)-historySize:]
 	}
+}
+
+// usagePercent returns the busy share between two samples, guarding against
+// counters that went backwards (CPU hotplug).
+func usagePercent(prev, cur cpuTick) float64 {
+	if cur.total() <= prev.total() || cur.busy() < prev.busy() {
+		return 0
+	}
+	return float64(cur.busy()-prev.busy()) / float64(cur.total()-prev.total()) * 100
 }
 
 func (c *CPUCollector) Stats() CPUStats {

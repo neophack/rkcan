@@ -1,0 +1,50 @@
+#!/bin/sh
+# rkcan-ctl - manage the rkcan service the same way on systemd and SysV/BusyBox.
+CONF=@CONFDIR@/rkcan.conf
+
+usage() {
+    cat <<USAGE
+Usage: rkcan-ctl <command>
+
+  start | stop | restart | status   control the service
+  log                               follow the log
+  config                            edit the configuration, then restart
+  can                               re-apply CAN interface settings and restart
+  version                           print the installed version
+USAGE
+}
+
+has_systemd() { [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; }
+
+initscript() {
+    for f in /etc/init.d/rkcan /etc/init.d/S99rkcan; do
+        [ -x "$f" ] && { echo "$f"; return; }
+    done
+}
+
+svc() {
+    if has_systemd; then
+        systemctl "$1" rkcan
+    else
+        s=$(initscript)
+        [ -n "$s" ] || { echo "rkcan service is not installed" >&2; exit 1; }
+        "$s" "$1"
+    fi
+}
+
+case "$1" in
+    start|stop|restart|status) svc "$1" ;;
+    log)
+        if has_systemd && ! grep -qE '^RKCAN_LOGFILE=.+' "$CONF" 2>/dev/null; then
+            journalctl -u rkcan -f -n 100
+        else
+            f=$(sed -n 's/^RKCAN_LOGFILE=//p' "$CONF" 2>/dev/null | tail -n 1)
+            tail -n 100 -f "${f:-/var/log/rkcan.log}"
+        fi ;;
+    config)
+        ${EDITOR:-vi} "$CONF" && svc restart ;;
+    can)
+        if has_systemd; then systemctl restart rkcan-can rkcan; else svc stop; svc start; fi ;;
+    version) @BINDIR@/rkcan -version ;;
+    *) usage; [ -n "$1" ] && exit 1 ;;
+esac

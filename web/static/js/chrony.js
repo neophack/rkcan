@@ -130,6 +130,14 @@
                 renderSourceStats(data.sourceStats);
                 renderConfig(data.config);
                 hasLoaded = true;
+                if (data.error) {
+                    // chronyd not running or chronyc not installed
+                    setLeapBadge('Error');
+                    window.showToast(data.error, 'error');
+                    if (sourcesTbody && !(data.sources || []).length) {
+                        sourcesTbody.innerHTML = '<tr><td colspan="7" class="text-muted">' + window.escapeHtml(data.error) + '</td></tr>';
+                    }
+                }
             })
             .catch(function () {
                 setLeapBadge('Error');
